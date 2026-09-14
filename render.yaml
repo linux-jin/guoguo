@@ -9,7 +9,7 @@ services:
     plan: free
     region: singapore
     dockerfilePath: ./Dockerfile
-    autoDeployTrigger: off
+    autoDeployTrigger: commit
     healthCheckPath: /healthz
     envVars:
       - key: TZ
