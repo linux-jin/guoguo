@@ -8,8 +8,8 @@
 .library-actions>summary,#libraryMenuUpdatedAt{display:none}
 .library-actions:not([open]) .action-popover{display:none}
 .library-actions .action-popover{position:static;min-width:0;padding:0;display:flex;gap:5px;border:0;box-shadow:none;background:transparent}
-.ranking-dialog{color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:12px;width:min(720px,calc(100vw - 20px));height:min(700px,84dvh);max-height:calc(100dvh - 20px);padding:0;overflow:hidden}
-.ranking-dialog::backdrop{background:#10182788}
+.ranking-dialog{color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:16px;width:min(720px,calc(100vw - 20px));height:min(700px,84dvh);max-height:calc(100dvh - 20px);padding:0;overflow:hidden}
+.ranking-dialog::backdrop{background:rgba(6,8,14,.78);backdrop-filter:blur(10px)}
 .ranking-dialog[open]{display:flex;flex-direction:column}
 .ranking-header{padding:12px 14px 8px;flex:none;border-bottom:1px solid var(--line)}
 .ranking-header h2{font-size:18px}

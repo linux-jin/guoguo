@@ -1,5 +1,5 @@
-.history-dialog{color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:12px;width:min(680px,calc(100vw - 20px));height:min(620px,82dvh);max-height:calc(100dvh - 20px);padding:0;overflow:hidden}
-.history-dialog::backdrop{background:#10182788}
+.history-dialog{color:var(--text);background:var(--panel);border:1px solid var(--line);border-radius:16px;width:min(680px,calc(100vw - 20px));height:min(620px,82dvh);max-height:calc(100dvh - 20px);padding:0;overflow:hidden}
+.history-dialog::backdrop{background:rgba(6,8,14,.78);backdrop-filter:blur(10px)}
 .history-dialog[open]{display:flex;flex-direction:column}
 .history-header{padding:12px 14px 10px;border-bottom:1px solid var(--line);flex:none}
 .history-header .heading{flex-wrap:nowrap}
