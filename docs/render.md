@@ -1,5 +1,8 @@
 # 发布到 Render
 
+当前仓库的 `render.yaml` 是 **免费试用、仅在线看**：`plan: free`，无磁盘，关闭下载/合并，点播用更低码率转码并关掉预缓存。休眠或重新部署后剧库缓存会丢；512MB 上点播仍可能卡或失败。确认能用后再升到 1c-2g 并加 Persistent Disk（挂 `/data`）。
+
+
 这是私人自用的 Web 部署，不是公开短剧站。Render 会给 `*.onrender.com` 公网地址，没有登录谁都能进。程序在 Render 上**必须**设置 `JUKU_BASIC_AUTH_USER` 和 `JUKU_BASIC_AUTH_PASS`，否则拒绝启动。
 
 只应观看或下载你拥有权利或已获授权的内容。点播会在服务器上 FFmpeg 转码，流量和 CPU 都从 Render 走，不适合当在线影院。

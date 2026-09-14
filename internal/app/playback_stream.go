@@ -83,7 +83,11 @@ func (downloader *Downloader) resolvePlaybackMedia(ctx context.Context, task Tas
 }
 
 func playbackFFmpegArgs(media providerMedia, input string, offset float64) []string {
-	args := []string{"-hide_banner", "-loglevel", "info", "-nostats", "-nostdin", "-threads", "2"}
+	threads := "2"
+	if watchOnlyMode() {
+		threads = "1"
+	}
+	args := []string{"-hide_banner", "-loglevel", "info", "-nostats", "-nostdin", "-threads", threads}
 	if isProviderHTTPMediaURL(input) {
 		args = append(args, "-rw_timeout", "20000000", "-protocol_whitelist", "http,https,tcp,tls,crypto,httpproxy")
 	} else {
@@ -97,6 +101,16 @@ func playbackFFmpegArgs(media providerMedia, input string, offset float64) []str
 	}
 	if offset > 0 {
 		args = append(args, "-ss", strconv.FormatFloat(offset, 'f', 3, 64))
+	}
+	if watchOnlyMode() {
+		return append(args,
+			"-i", input, "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-map_metadata", "-1",
+			"-vf", "fps=24,scale=w='min(iw,854)':h='min(ih,480)':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1",
+			"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline", "-level:v", "3.1",
+			"-pix_fmt", "yuv420p", "-crf", "28", "-maxrate", "1200k", "-bufsize", "2400k", "-threads", "1",
+			"-g", "48", "-keyint_min", "48", "-sc_threshold", "0",
+			"-c:a", "aac", "-b:a", "96k", "-ar", "44100", "-ac", "2",
+			"-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-frag_duration", "1000000", "-f", "mp4", "pipe:1")
 	}
 	return append(args,
 		"-i", input, "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-map_metadata", "-1",

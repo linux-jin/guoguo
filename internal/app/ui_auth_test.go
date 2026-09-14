@@ -49,3 +49,24 @@ func TestRequireHostedAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestWatchOnlyMode(t *testing.T) {
+	t.Setenv("RENDER", "")
+	t.Setenv("RENDER_SERVICE_ID", "")
+	t.Setenv("JUKU_WATCH_ONLY", "1")
+	if !watchOnlyMode() {
+		t.Fatal("expected watch-only")
+	}
+	rec := httptest.NewRecorder()
+	if !rejectWatchOnly(rec) || rec.Code != http.StatusForbidden {
+		t.Fatalf("reject status=%d", rec.Code)
+	}
+}
+
+func TestWatchOnlyDefaultOnRender(t *testing.T) {
+	t.Setenv("RENDER", "true")
+	t.Setenv("JUKU_WATCH_ONLY", "")
+	if !watchOnlyMode() {
+		t.Fatal("Render should default to watch-only")
+	}
+}

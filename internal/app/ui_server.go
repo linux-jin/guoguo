@@ -900,6 +900,9 @@ func isKnownImage(buf []byte) bool {
 }
 
 func (a *UIApp) handleDownload(w http.ResponseWriter, r *http.Request) {
+	if rejectWatchOnly(w) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
@@ -913,6 +916,9 @@ func (a *UIApp) handleDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *UIApp) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	if rejectWatchOnly(w) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
@@ -1412,6 +1418,9 @@ func (a *UIApp) handleClear(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *UIApp) handleMerge(w http.ResponseWriter, r *http.Request) {
+	if rejectWatchOnly(w) {
+		return
+	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
@@ -1623,7 +1632,7 @@ func (a *UIApp) handleConfig(w http.ResponseWriter, r *http.Request) {
 	nextOutputDir := firstNonEmpty(a.nextOutputDir, cfg.outputDirSetting, cfg.OutputDir)
 	a.mu.Unlock()
 	proxyMode, proxyURL, proxyHasAuth := publicProxyConfig(cfg.ProxyURL)
-	writeJSON(w, http.StatusOK, map[string]any{"outputDir": cfg.OutputDir, "outputDirSetting": nextOutputDir, "restartRequired": !sameDirectory(cfg.OutputDir, nextOutputDir), "dataDir": cfg.dataDirectory(), "concurrency": cfg.Concurrency, "ffmpeg": cfg.FFmpeg, "address": addr, "libraryCachePath": libraryCachePath(cfg.dataDirectory()), "requestConcurrency": cfg.RequestConcurrency, "requestIntervalMs": cfg.RequestIntervalMS, "network": a.downloader.proxyRouter.summary(), "proxyMode": proxyMode, "proxyURL": proxyURL, "proxyHasAuth": proxyHasAuth})
+	writeJSON(w, http.StatusOK, map[string]any{"outputDir": cfg.OutputDir, "outputDirSetting": nextOutputDir, "restartRequired": !sameDirectory(cfg.OutputDir, nextOutputDir), "dataDir": cfg.dataDirectory(), "concurrency": cfg.Concurrency, "ffmpeg": cfg.FFmpeg, "address": addr, "libraryCachePath": libraryCachePath(cfg.dataDirectory()), "requestConcurrency": cfg.RequestConcurrency, "requestIntervalMs": cfg.RequestIntervalMS, "network": a.downloader.proxyRouter.summary(), "proxyMode": proxyMode, "proxyURL": proxyURL, "proxyHasAuth": proxyHasAuth, "watchOnly": watchOnlyMode()})
 }
 
 func readIDsRequest(w http.ResponseWriter, r *http.Request) ([]string, bool) {

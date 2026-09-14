@@ -168,6 +168,10 @@ func (cache *playbackPrefetch) serve(ctx context.Context, writer http.ResponseWr
 }
 
 func (app *UIApp) handlePlaybackPrefetch(writer http.ResponseWriter, request *http.Request) {
+	if watchOnlyMode() {
+		writeJSON(writer, http.StatusOK, map[string]any{"disabled": true})
+		return
+	}
 	var input struct {
 		Session string `json:"session"`
 		Episode int    `json:"episode"`

@@ -13,6 +13,25 @@ func hostedPlatform() bool {
 	return os.Getenv("RENDER") != "" || os.Getenv("RENDER_SERVICE_ID") != ""
 }
 
+func watchOnlyMode() bool {
+	value := strings.TrimSpace(os.Getenv("JUKU_WATCH_ONLY"))
+	if value == "0" || strings.EqualFold(value, "false") {
+		return false
+	}
+	if value == "1" || strings.EqualFold(value, "true") || hostedPlatform() {
+		return true
+	}
+	return false
+}
+
+func rejectWatchOnly(writer http.ResponseWriter) bool {
+	if !watchOnlyMode() {
+		return false
+	}
+	writeJSON(writer, http.StatusForbidden, map[string]string{"error": "当前为在线观看模式，已关闭下载和合并"})
+	return true
+}
+
 func applyHostedListenDefaults(listen *string, open *bool) {
 	if !flagWasSet("listen") {
 		if port := strings.TrimSpace(os.Getenv("PORT")); port != "" {

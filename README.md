@@ -61,8 +61,7 @@ docker compose up --build
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/linux-jin/guoguo)
 
-点按钮后用你的 Render 账号确认 Blueprint。首次必须填写 `JUKU_BASIC_AUTH_USER`，密码由 Render 生成。不要用免费实例。按钮部署的是 GitHub 上的代码，请先把 `render.yaml` 和 Docker 相关文件推到 `main`。完整说明见 [发布到 Render](docs/render.md)。
-
+当前是 **免费试用**：能打开网页，但没有持久盘，闲置约 15 分钟会休眠，剧库缓存和下载会清空；在线点播也可能因 512MB 内存不够而失败。点按钮后填写 `JUKU_BASIC_AUTH_USER`，到 Environment 复制 `JUKU_BASIC_AUTH_PASS`。完整说明见 [发布到 Render](docs/render.md)。
 
 
 ## 红果 App 剧库

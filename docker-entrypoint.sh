@@ -8,4 +8,5 @@ else
   OUT_DIR="$DATA_DIR/downloads"
 fi
 mkdir -p "$DATA_DIR" "$OUT_DIR"
-exec juku -open=false -listen "0.0.0.0:${PORT}" -data-dir "$DATA_DIR" -out "$OUT_DIR" -ffmpeg "${JUKU_FFMPEG:-ffmpeg}" "$@"
+CONCURRENCY="${JUKU_CONCURRENCY:-1}"
+exec juku -open=false -listen "0.0.0.0:${PORT}" -data-dir "$DATA_DIR" -out "$OUT_DIR" -ffmpeg "${JUKU_FFMPEG:-ffmpeg}" -c "$CONCURRENCY" "$@"
