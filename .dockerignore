@@ -1,0 +1,12 @@
+.git
+.DS_Store
+data
+dist
+短剧下载
+bin/ffmpeg
+bin/ffmpeg.exe
+bin/ffprobe
+bin/ffprobe.exe
+docs
+scripts
+*.md

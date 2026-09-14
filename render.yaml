@@ -1,0 +1,25 @@
+# Render Blueprint：Web Service + 持久盘。
+# 免费实例没有持久盘，FFmpeg 点播也扛不住；请用至少 1c-2g。
+# 首次部署后在 Dashboard 填写 JUKU_BASIC_AUTH_USER，并保存生成的密码。
+services:
+  - type: web
+    name: juku
+    runtime: docker
+    plan: 1c-2g
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    autoDeployTrigger: off
+    healthCheckPath: /healthz
+    disk:
+      name: juku-data
+      mountPath: /data
+      sizeGB: 20
+    envVars:
+      - key: TZ
+        value: Asia/Shanghai
+      - key: JUKU_FFMPEG
+        value: ffmpeg
+      - key: JUKU_BASIC_AUTH_USER
+        sync: false
+      - key: JUKU_BASIC_AUTH_PASS
+        generateValue: true
