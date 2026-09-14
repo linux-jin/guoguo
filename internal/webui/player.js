@@ -13,6 +13,17 @@
   let sessionID = '';
   let sessionAvailable = false;
   let mimeType = '';
+  let useNativeStream = false;
+  const MediaSourceClass = window.ManagedMediaSource || window.MediaSource || null;
+  const playbackMimeCandidates = ['video/mp4; codecs="avc1.42C01F, mp4a.40.2"', 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"', 'video/mp4; codecs="avc1.4D401E, mp4a.40.2"', 'video/mp4; codecs="avc1.42001E, mp4a.40.2"', 'video/mp4'];
+  function supportedPlaybackMime(preferred) {
+    if (!MediaSourceClass || typeof MediaSourceClass.isTypeSupported !== 'function') return '';
+    const types = preferred ? [preferred, ...playbackMimeCandidates.filter(type => type !== preferred)] : playbackMimeCandidates;
+    for (const type of types) {
+      try { if (MediaSourceClass.isTypeSupported(type)) return type; } catch (_) {}
+    }
+    return '';
+  }
   let episodes = [];
   let episodeButtons = [];
   let currentIndex = 0;
@@ -227,10 +238,10 @@
     clear(episodeList);
     updateEpisodeControls();
     if (!panel.open) panel.showModal();
-    if (!window.MediaSource || !MediaSource.isTypeSupported('video/mp4; codecs="avc1.42C01F, mp4a.40.2"')) {
-      showError(new Error('当前浏览器不支持此在线播放格式，请使用新版 Chrome、Edge、Firefox 或桌面 Safari'));
-      return;
-    }
+    useNativeStream = !supportedPlaybackMime();
+    if ('disableRemotePlayback' in video) video.disableRemotePlayback = true;
+    video.setAttribute('playsinline', '');
+    video.setAttribute('webkit-playsinline', 'true');
     const version = openingVersion;
     openingController = new AbortController();
     try {
@@ -242,13 +253,14 @@
       }
       sessionID = result.session;
       sessionAvailable = true;
-      mimeType = result.mimeType;
+      mimeType = supportedPlaybackMime(result.mimeType) || result.mimeType;
       dramaID = result.dramaId || id;
       dramaName = result.title || title;
       historySource = result.source || '';
       collectionMode = result.mode === 'collection';
       episodes = result.episodes || [];
-      if (!episodes.length || !MediaSource.isTypeSupported(mimeType)) throw new Error('站点没有可播放的分集或浏览器不支持此格式');
+      if (!episodes.length) throw new Error('站点没有可播放的分集');
+      if (!supportedPlaybackMime(mimeType)) useNativeStream = true;
       node('playerTitle').textContent = result.title || title;
       renderEpisodes();
       heartbeatTimer = setInterval(heartbeat, 20000);
@@ -352,6 +364,39 @@
     }
   }
 
+  function playNativeStream(streamURL, shouldPlay, signal, version) {
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        video.removeEventListener('canplay', onReady);
+        video.removeEventListener('loadeddata', onReady);
+        video.removeEventListener('ended', onEnded);
+        signal.removeEventListener('abort', onAbort);
+      };
+      const onAbort = () => { cleanup(); reject(abortError()); };
+      const onReady = () => {
+        if (signal.aborted || version !== streamVersion) return;
+        loading = false;
+        streamComplete = true;
+        video.playbackRate = Number(node('playbackRate').value) || 1;
+        statusText.textContent = shouldPlay ? '正在播放' : '已暂停';
+        if (shouldPlay) {
+          Promise.resolve(video.play()).catch(error => {
+            if (version !== streamVersion || signal.aborted) return;
+            if (error.name === 'NotAllowedError') statusText.textContent = '已经就绪，请点击视频中的播放按钮';
+            else if (error.name !== 'AbortError') showError(error);
+          });
+        }
+      };
+      const onEnded = () => { cleanup(); resolve(); };
+      signal.addEventListener('abort', onAbort);
+      video.addEventListener('canplay', onReady, {once: true});
+      video.addEventListener('loadeddata', onReady, {once: true});
+      video.addEventListener('ended', onEnded, {once: true});
+      video.src = streamURL;
+      video.load();
+    });
+  }
+
   async function playEpisode(index, offset = 0, shouldPlay = true, keepResumeMessage = false) {
     if (!episodes[index - 1]) return;
     if (!sessionAvailable) {reopen(index, offset); return;}
@@ -371,7 +416,8 @@
     const controller = new AbortController();
     streamController = controller;
     const signal = controller.signal;
-    const source = new MediaSource();
+    const streamURL = '/api/ui/playback/stream?' + new URLSearchParams({session: currentSession, episode: String(index), start: String(offset)});
+    const source = MediaSourceClass ? new MediaSourceClass() : null;
     let reader;
     try {
       if (collectionMode && preparedIndex !== index) {
@@ -382,9 +428,13 @@
         updatePlaybackHint(preparation.source);
         window.dispatchEvent(new Event('downloadsChanged'));
       }
+      if (useNativeStream || !source) {
+        await playNativeStream(streamURL, shouldPlay, signal, version);
+        return;
+      }
       objectURL = URL.createObjectURL(source);
       await waitForEvent(source, 'sourceopen', signal, () => {video.src = objectURL;});
-      const response = await fetch('/api/ui/playback/stream?' + new URLSearchParams({session: currentSession, episode: String(index), start: String(offset)}), {signal, cache: 'no-store'});
+      const response = await fetch(streamURL, {signal, cache: 'no-store'});
       if (!response.ok) {
         const result = await response.json();
         const error = new Error(result.error || 'HTTP ' + response.status);
