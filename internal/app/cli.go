@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-const defaultUIListenAddress = "0.0.0.0:8999"
+const defaultUIListenAddress = "0.0.0.0:8998"
 
 type boolOverride struct {
 	set bool
@@ -73,7 +73,7 @@ func publicURL(addr string) string {
 }
 
 func usage() {
-	fmt.Print(`juku - 跨平台批量短剧下载工具
+	fmt.Print(`短剧库 - 在线追剧与下载管理
 
 请仅下载你拥有权利或已获授权的视频内容。
 
@@ -82,7 +82,7 @@ func usage() {
 
 常用参数：
   -ui=true|false               启动/关闭本地浏览器管理界面，默认 true
-  -listen 地址                UI 监听地址，默认 0.0.0.0:8999，支持局域网访问
+  -listen 地址                UI 监听地址，默认 0.0.0.0:8998，支持局域网访问
   -open=true|false            UI 模式是否自动打开浏览器，默认 true
   -mode all|search|id|list    CLI 模式，需配合 -ui=false，默认 all
   -keyword 关键词             search 模式关键词
@@ -118,7 +118,7 @@ func Run() {
 	dataDir := flag.String("data-dir", "data", "configuration, cache and task directory")
 	ffmpeg := flag.String("ffmpeg", "", "ffmpeg path")
 	uiMode := flag.Bool("ui", true, "start local web UI")
-	listen := flag.String("listen", defaultUIListenAddress, "UI listen address; use 127.0.0.1:8999 for local-only access")
+	listen := flag.String("listen", defaultUIListenAddress, "UI listen address; use 127.0.0.1:8998 for local-only access")
 	open := flag.Bool("open", true, "open browser automatically in UI mode")
 	refresh := flag.Bool("refresh", false, "refresh the CLI library instead of using local cache")
 	more := flag.Bool("more", false, "continue loading the Hongguo App catalog from its saved cursor")
@@ -171,6 +171,8 @@ func Run() {
 	}
 	_, ffmpegErr := exec.LookPath(cfg.FFmpeg)
 	fmt.Printf("输出目录: %s\n下载并发: %d\nFFmpeg 可用: %t\nTLS证书校验: %t\n", cfg.OutputDir, cfg.Concurrency, ffmpegErr == nil, !cfg.InsecureTLS)
+	d.recordDiagnostic(diagnosticEvent{Level: "info", Event: "app.started", Message: "短剧库已启动"})
+	fmt.Printf("诊断日志: %s\n", d.diagnostics.path)
 	if ffmpegErr != nil {
 		fmt.Println("未找到 FFmpeg，将自动下载匹配当前系统的便携版本；如下载失败，请在界面中调整代理后重试。")
 	}
@@ -191,6 +193,7 @@ func Run() {
 			}()
 		}
 		if err := app.ListenAndServe(addr); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			d.recordDiagnostic(diagnosticEvent{Event: "app.failed", Message: err.Error()})
 			fmt.Fprintf(os.Stderr, "UI 服务停止: %v\n", err)
 			os.Exit(1)
 		}

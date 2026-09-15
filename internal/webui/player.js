@@ -5,6 +5,12 @@
   const episodeList = node('playbackEpisodes');
   const statusText = node('playbackStatus');
   const errorText = node('playbackError');
+  const qualityControl = node('playbackQualityControl');
+  const qualitySelect = node('playbackQuality');
+  let quality = 0;
+  let transport = 'mse';
+  try {quality = Number(localStorage.getItem('juku.playback.quality')) || 0;} catch (_) {}
+  if (!Number.isInteger(quality) || quality < 0 || quality > 4320) quality = 0;
   let dramaID = '';
   let dramaName = '';
   let collectionTaskID = '';
@@ -13,19 +19,10 @@
   let sessionID = '';
   let sessionAvailable = false;
   let mimeType = '';
-  let useNativeStream = false;
-  const MediaSourceClass = window.ManagedMediaSource || window.MediaSource || null;
-  const playbackMimeCandidates = ['video/mp4; codecs="avc1.42C01F, mp4a.40.2"', 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"', 'video/mp4; codecs="avc1.4D401E, mp4a.40.2"', 'video/mp4; codecs="avc1.42001E, mp4a.40.2"', 'video/mp4'];
-  function supportedPlaybackMime(preferred) {
-    if (!MediaSourceClass || typeof MediaSourceClass.isTypeSupported !== 'function') return '';
-    const types = preferred ? [preferred, ...playbackMimeCandidates.filter(type => type !== preferred)] : playbackMimeCandidates;
-    for (const type of types) {
-      try { if (MediaSourceClass.isTypeSupported(type)) return type; } catch (_) {}
-    }
-    return '';
-  }
   let episodes = [];
   let episodeButtons = [];
+  let episodePage = 0, prefetchStatusTimer = null, prefetchPreparing = false;
+  const completedEpisodes = new Set();
   let currentIndex = 0;
   let openingVersion = 0;
   let streamVersion = 0;
@@ -56,6 +53,35 @@
 
   function clear(element) {
     while (element.firstChild) element.removeChild(element.firstChild);
+  }
+
+  function supportsNativePlayback() {
+    return Boolean(video.canPlayType('application/vnd.apple.mpegurl') || video.canPlayType('application/x-mpegURL'));
+  }
+
+  function supportsMediaSource(type) {
+    return Boolean(window.MediaSource && window.MediaSource.isTypeSupported(type));
+  }
+
+  function updateQualities(options, current) {
+    clear(qualitySelect);
+    const automatic = document.createElement('option');
+    automatic.value = '0';
+    automatic.textContent = current > 0 ? '自动（' + current + 'p）' : '自动';
+    qualitySelect.appendChild(automatic);
+    const values = new Set();
+    for (const entry of Array.isArray(options) ? options : []) {
+      const value = Number(entry.value);
+      if (!Number.isInteger(value) || value <= 0 || value > 4320 || values.has(value)) continue;
+      values.add(value);
+      const option = document.createElement('option');
+      option.value = String(value);
+      option.textContent = value + 'p';
+      qualitySelect.appendChild(option);
+    }
+    qualitySelect.value = values.has(quality) ? String(quality) : '0';
+    qualityControl.hidden = values.size < 2;
+    qualitySelect.disabled = loading;
   }
 
   async function requestJSON(path, body, signal) {
@@ -122,10 +148,14 @@
     playbackRun = 0;
     streamComplete = false;
     prefetchAttempted = 0;
+    prefetchPreparing = false;
+    clearTimeout(prefetchStatusTimer);
     prefetchVersion++;
     prefetchStatus.hidden = true;
     prefetchStatus.textContent = '';
     loading = true;
+    qualityControl.hidden = true;
+    qualitySelect.disabled = true;
     clearTimeout(seekTimer);
     if (streamController) streamController.abort();
     streamController = null;
@@ -158,20 +188,24 @@
     node('previousEpisodeBtn').disabled = currentIndex <= 1;
     node('nextEpisodeBtn').disabled = currentIndex < 1 || currentIndex >= episodes.length;
     node('retryPlaybackBtn').disabled = !dramaID && !collectionTaskID;
-    episodeButtons.forEach((button, index) => button.setAttribute('aria-current', String(index + 1 === currentIndex)));
-    node('playbackEpisodeCount').textContent = episodes.length ? '第 ' + (episodes[currentIndex - 1]?.episode || currentIndex || '—') + ' 集 / 共 ' + episodes.length + ' 集' : '选集';
-    const active = episodeButtons[currentIndex - 1];
-    if (active) {
-      const item = active.getBoundingClientRect();
-      const viewport = episodeList.getBoundingClientRect();
-      if (item.top < viewport.top) episodeList.scrollTop -= viewport.top - item.top;
-      else if (item.bottom > viewport.bottom) episodeList.scrollTop += item.bottom - viewport.bottom;
+    node('retryPlaybackBtn').hidden = !errorText.textContent;
+    for (const button of episodeButtons) {
+      const index = Number(button.dataset.episodeIndex);
+      button.setAttribute('aria-current', String(index === currentIndex));
+      button.classList.toggle('watched', completedEpisodes.has(index));
     }
+    node('playbackEpisodeCount').textContent = episodes.length ? '第 ' + (episodes[currentIndex - 1]?.episode || currentIndex || '—') + ' 集 / 共 ' + episodes.length + ' 集' : '正在获取分集';
+    node('jumpEpisode').max = episodes.length || 1;
+    node('jumpEpisode').disabled = !episodes.length;
+    node('jumpEpisodeBtn').disabled = !episodes.length;
+    node('currentEpisodeBtn').disabled = !currentIndex;
+    node('episodeRange').disabled = !episodes.length;
   }
 
   function showError(error) {
     window.JukuPlaybackDanmaku?.suspend();
     loading = false;
+    qualitySelect.disabled = false;
     errorText.textContent = (error.message || String(error)) + '；可点击“重试播放”。';
     statusText.textContent = '播放未完成';
     if (error.status === 410) sessionAvailable = false;
@@ -184,14 +218,26 @@
     else if (state.status === 'ready') statusText.textContent = collectionMode ? '正在读取合集分集…' : '正在获取分集…';
   }
 
-  function renderEpisodes() {
+  function renderEpisodes(page = episodePage) {
+    episodePage = Math.max(0, Math.min(page, Math.ceil(episodes.length / 30) - 1));
     clear(episodeList);
-    episodeButtons = episodes.map(episode => {
+    const range = node('episodeRange');
+    clear(range);
+    for (let start = 0; start < episodes.length; start += 30) {
+      const option = document.createElement('option');
+      option.value = String(start / 30);
+      option.textContent = (start + 1) + '–' + Math.min(episodes.length, start + 30) + ' 集';
+      range.appendChild(option);
+    }
+    range.value = String(episodePage);
+    episodeButtons = episodes.slice(episodePage * 30, episodePage * 30 + 30).map(episode => {
       const button = document.createElement('button');
       button.className = 'secondary';
-      button.textContent = '第' + episode.episode + '集';
-      button.title = episode.title || button.textContent;
-      button.addEventListener('click', () => playEpisode(episode.index));
+      button.textContent = episode.episode;
+      button.title = episode.title || '第 ' + episode.episode + ' 集';
+      button.setAttribute('aria-label', '播放第 ' + episode.episode + ' 集');
+      button.dataset.episodeIndex = episode.index;
+      button.addEventListener('click', () => {playEpisode(episode.index); closeEpisodePanel();});
       episodeList.appendChild(button);
       return button;
     });
@@ -224,6 +270,8 @@
     collectionMode = Boolean(taskID);
     episodes = [];
     episodeButtons = [];
+    episodePage = 0;
+    completedEpisodes.clear();
     currentIndex = 0;
     lastPosition = offset;
     historySource = '';
@@ -238,10 +286,10 @@
     clear(episodeList);
     updateEpisodeControls();
     if (!panel.open) panel.showModal();
-    useNativeStream = !supportedPlaybackMime();
-    if ('disableRemotePlayback' in video) video.disableRemotePlayback = true;
-    video.setAttribute('playsinline', '');
-    video.setAttribute('webkit-playsinline', 'true');
+    if (!supportsMediaSource('video/mp4; codecs="avc1.42C01F, mp4a.40.2"') && !supportsNativePlayback()) {
+      showError(new Error('当前浏览器不支持 H.264 在线播放，请更新浏览器后重试'));
+      return;
+    }
     const version = openingVersion;
     openingController = new AbortController();
     try {
@@ -253,14 +301,19 @@
       }
       sessionID = result.session;
       sessionAvailable = true;
-      mimeType = supportedPlaybackMime(result.mimeType) || result.mimeType;
+      mimeType = result.mimeType;
       dramaID = result.dramaId || id;
       dramaName = result.title || title;
       historySource = result.source || '';
       collectionMode = result.mode === 'collection';
       episodes = result.episodes || [];
-      if (!episodes.length) throw new Error('站点没有可播放的分集');
-      if (!supportedPlaybackMime(mimeType)) useNativeStream = true;
+      const remembered = window.JukuHistory.get(dramaID);
+      if (remembered?.completed) {
+        const finished = episodes.find(episode => remembered.chapterId ? episode.chapterId === remembered.chapterId : episode.episode === remembered.episode);
+        if (finished) completedEpisodes.add(finished.index);
+      }
+      transport = supportsMediaSource(mimeType) ? 'mse' : 'hls';
+      if (!episodes.length || transport === 'hls' && !supportsNativePlayback()) throw new Error('站点没有可播放的分集或浏览器不支持此格式');
       node('playerTitle').textContent = result.title || title;
       renderEpisodes();
       heartbeatTimer = setInterval(heartbeat, 20000);
@@ -323,13 +376,27 @@
     return 0;
   }
 
+  function schedulePrefetchStatus() {
+    clearTimeout(prefetchStatusTimer);
+    if (!prefetchPreparing || !prefetchToggle.checked || !panel.open || !sessionID) return;
+    const session = sessionID, run = playbackRun;
+    prefetchStatusTimer = setTimeout(async () => {
+      if (session !== sessionID || run !== playbackRun) return;
+      await heartbeat();
+      if (session === sessionID && run === playbackRun) schedulePrefetchStatus();
+    }, document.hidden ? 10000 : 2000);
+  }
+
   function renderPrefetchStatus(view) {
     if (!prefetchToggle.checked || !view || view.episode !== currentIndex + 1) return;
     prefetchStatus.hidden = false;
-    prefetchStatus.textContent = view.state === 'ready' ? '下一集已缓存' : view.state === 'failed' ? '下一集将正常缓冲' : '正在缓存下一集…';
+    prefetchStatus.textContent = view.state === 'ready' ? '下一集已缓存' : view.state === 'partial' ? '下一集开头已缓存' : view.state === 'failed' ? '下一集将正常缓冲' : '正在缓存下一集…';
+    prefetchPreparing = !['ready', 'partial', 'failed'].includes(view.state);
+    schedulePrefetchStatus();
   }
 
   function maybePrefetchNext() {
+    if (transport === 'hls' && playbackDuration > 0 && video.currentTime > 0 && bufferedAhead() >= playbackDuration - video.currentTime - 0.5) streamComplete = true;
     if (!prefetchToggle.checked || !streamComplete || loading || video.paused || video.ended || video.seeking || !panel.open || !sessionAvailable || !playbackRun || !currentIndex || currentIndex >= episodes.length || prefetchAttempted === currentIndex) return;
     const remaining = video.duration - video.currentTime;
     if (!Number.isFinite(remaining) || remaining <= 0 || remaining / Math.max(video.playbackRate, 0.25) > 30 || bufferedAhead() < remaining - 0.5) return;
@@ -350,6 +417,8 @@
     prefetchAttempted = 0;
     const version = ++prefetchVersion;
     prefetchStatus.hidden = true;
+    prefetchPreparing = false;
+    clearTimeout(prefetchStatusTimer);
     if (prefetchToggle.checked) {
       maybePrefetchNext();
     } else if (sessionID && playbackRun) {
@@ -364,36 +433,25 @@
     }
   }
 
-  function playNativeStream(streamURL, shouldPlay, signal, version) {
-    return new Promise((resolve, reject) => {
-      const cleanup = () => {
-        video.removeEventListener('canplay', onReady);
-        video.removeEventListener('loadeddata', onReady);
-        video.removeEventListener('ended', onEnded);
-        signal.removeEventListener('abort', onAbort);
-      };
-      const onAbort = () => { cleanup(); reject(abortError()); };
-      const onReady = () => {
-        if (signal.aborted || version !== streamVersion) return;
-        loading = false;
-        streamComplete = true;
-        video.playbackRate = Number(node('playbackRate').value) || 1;
-        statusText.textContent = shouldPlay ? '正在播放' : '已暂停';
-        if (shouldPlay) {
-          Promise.resolve(video.play()).catch(error => {
-            if (version !== streamVersion || signal.aborted) return;
-            if (error.name === 'NotAllowedError') statusText.textContent = '已经就绪，请点击视频中的播放按钮';
-            else if (error.name !== 'AbortError') showError(error);
-          });
-        }
-      };
-      const onEnded = () => { cleanup(); resolve(); };
-      signal.addEventListener('abort', onAbort);
-      video.addEventListener('canplay', onReady, {once: true});
-      video.addEventListener('loadeddata', onReady, {once: true});
-      video.addEventListener('ended', onEnded, {once: true});
-      video.src = streamURL;
-      video.load();
+  async function playNative(index, offset, shouldPlay, version, currentSession, signal) {
+    const result = await requestJSON('/api/ui/playback/hls/open', {session: currentSession, episode: index, start: offset, quality, version}, signal);
+    if (signal.aborted || version !== streamVersion) throw abortError();
+    playbackRun = Number(result.run);
+    playbackDuration = Number(result.duration) || 0;
+    updatePlaybackHint(result.source);
+    updateQualities(result.qualities, Number(result.quality));
+    statusText.textContent = result.prefetched ? '正在读取预缓存…' : '正在缓冲…';
+    await waitForEvent(video, 'loadedmetadata', signal, () => {video.src = result.url; video.load();});
+    if (signal.aborted || version !== streamVersion) throw abortError();
+    if (offset > 0) video.currentTime = Math.min(offset, Math.max(0, playbackDuration - 0.05));
+    video.playbackRate = Number(node('playbackRate').value) || 1;
+    loading = false;
+    qualitySelect.disabled = false;
+    statusText.textContent = shouldPlay ? '正在播放' : '已暂停';
+    if (shouldPlay) video.play().catch(error => {
+      if (version !== streamVersion || signal.aborted) return;
+      if (error.name === 'NotAllowedError') statusText.textContent = '已就绪，点击视频中的播放按钮';
+      else if (error.name !== 'AbortError') showError(error);
     });
   }
 
@@ -406,18 +464,17 @@
       historyStatus.textContent = '';
     }
     currentIndex = index;
+    if (Math.floor((index - 1) / 30) !== episodePage) renderEpisodes(Math.floor((index - 1) / 30));
     window.JukuPlaybackDanmaku?.setEpisode(sessionID, index, episodes[index - 1].danmaku);
     lastPosition = offset;
-    updateEpisodeControls();
     errorText.textContent = '';
+    updateEpisodeControls();
     statusText.textContent = offset > 0 ? '正在跳转并缓冲…' : '正在解析播放地址…';
     const version = streamVersion;
     const currentSession = sessionID;
     const controller = new AbortController();
     streamController = controller;
     const signal = controller.signal;
-    const streamURL = '/api/ui/playback/stream?' + new URLSearchParams({session: currentSession, episode: String(index), start: String(offset)});
-    const source = MediaSourceClass ? new MediaSourceClass() : null;
     let reader;
     try {
       if (collectionMode && preparedIndex !== index) {
@@ -428,13 +485,14 @@
         updatePlaybackHint(preparation.source);
         window.dispatchEvent(new Event('downloadsChanged'));
       }
-      if (useNativeStream || !source) {
-        await playNativeStream(streamURL, shouldPlay, signal, version);
+      if (transport === 'hls') {
+        await playNative(index, offset, shouldPlay, version, currentSession, signal);
         return;
       }
+      const source = new window.MediaSource();
       objectURL = URL.createObjectURL(source);
       await waitForEvent(source, 'sourceopen', signal, () => {video.src = objectURL;});
-      const response = await fetch(streamURL, {signal, cache: 'no-store'});
+      const response = await fetch('/api/ui/playback/stream?' + new URLSearchParams({session: currentSession, episode: String(index), start: String(offset), quality: String(quality), version: String(version)}), {signal, cache: 'no-store'});
       if (!response.ok) {
         const result = await response.json();
         const error = new Error(result.error || 'HTTP ' + response.status);
@@ -442,12 +500,24 @@
         throw error;
       }
       if (signal.aborted) throw abortError();
+      let options = [];
+      try {options = JSON.parse(response.headers.get('X-Playback-Qualities') || '[]');} catch (_) {}
+      updateQualities(options, Number(response.headers.get('X-Playback-Quality')));
+      const streamMIME = response.headers.get('X-Playback-MIME') || mimeType;
+      if (!supportsMediaSource(streamMIME)) {
+        if (supportsNativePlayback()) {
+          transport = 'hls';
+          playEpisode(index, offset, shouldPlay, keepResumeMessage);
+          return;
+        }
+        throw new Error('浏览器不支持当前清晰度的编码，可切换较低清晰度后重试');
+      }
       updatePlaybackHint(response.headers.get('X-Playback-Source'));
       const duration = Number(response.headers.get('X-Playback-Duration'));
       playbackDuration = Number.isFinite(duration) && duration > 0 ? duration : 0;
       const run = Number(response.headers.get('X-Playback-Run'));
       playbackRun = run;
-      const buffer = source.addSourceBuffer(mimeType);
+      const buffer = source.addSourceBuffer(streamMIME);
       buffer.timestampOffset = offset;
       if (duration > 0 && Number.isFinite(duration)) source.duration = duration;
       statusText.textContent = response.headers.get('X-Playback-Prefetched') === '1' ? '正在读取预缓存…' : '正在缓冲…';
@@ -467,6 +537,7 @@
           video.currentTime = Math.min(buffer.buffered.end(0) - 0.001, Math.max(offset, buffer.buffered.start(0) + 0.03));
           video.playbackRate = Number(node('playbackRate').value) || 1;
           loading = false;
+          qualitySelect.disabled = false;
           statusText.textContent = shouldPlay ? '正在播放' : '已暂停';
           if (shouldPlay) video.play().catch(error => {
             if (version !== streamVersion || signal.aborted) return;
@@ -492,6 +563,7 @@
   }
 
   video.addEventListener('seeking', () => {
+    if (transport === 'hls') return;
     if (loading || !currentIndex || !Number.isFinite(video.currentTime)) return;
     const target = video.currentTime;
     clearTimeout(seekTimer);
@@ -512,6 +584,8 @@
   video.addEventListener('ended', () => {
     if (loading || !panel.open || errorText.textContent) return;
     historyCompleted = true;
+    completedEpisodes.add(currentIndex);
+    updateEpisodeControls();
     saveHistory(true);
     if (node('autoNextEpisode').checked && currentIndex < episodes.length) playEpisode(currentIndex + 1);
     else statusText.textContent = '本集播放完毕';
@@ -524,9 +598,105 @@
     else reopen(currentIndex || 1, lastPosition);
   });
   node('playbackRate').addEventListener('change', () => {video.playbackRate = Number(node('playbackRate').value) || 1;});
+  qualitySelect.addEventListener('change', () => {
+    quality = Number(qualitySelect.value) || 0;
+    try {localStorage.setItem('juku.playback.quality', String(quality));} catch (_) {}
+    if (currentIndex) playEpisode(currentIndex, !loading && Number.isFinite(video.currentTime) ? video.currentTime : lastPosition, !video.paused);
+  });
   node('closePlayerBtn').addEventListener('click', () => panel.close());
   panel.addEventListener('close', () => {if (!panel.open) dispose();});
   document.addEventListener('visibilitychange', () => {if (document.hidden) saveHistory(true);});
   window.addEventListener('pagehide', () => dispose(true));
+
+  function showEpisodePanel() {
+    renderEpisodes(Math.floor(Math.max(0, currentIndex - 1) / 30));
+    if (window.matchMedia('(max-width:700px)').matches) {
+      panel.classList.add('episodes-open');
+      node('toggleEpisodesBtn').setAttribute('aria-expanded', 'true');
+      window.JukuDialogs.layer('episodes', true);
+      node('closeEpisodesBtn').focus();
+    } else node('episodeRange').focus();
+  }
+
+  function closeEpisodePanel() {
+    if (!panel.classList.contains('episodes-open')) return;
+    panel.classList.remove('episodes-open');
+    node('toggleEpisodesBtn').setAttribute('aria-expanded', 'false');
+    window.JukuDialogs.layer('episodes', false);
+    node('toggleEpisodesBtn').focus({preventScroll: true});
+  }
+
+  node('toggleEpisodesBtn').addEventListener('click', showEpisodePanel);
+  node('closeEpisodesBtn').addEventListener('click', closeEpisodePanel);
+  node('episodeRange').addEventListener('change', () => renderEpisodes(Number(node('episodeRange').value) || 0));
+  node('currentEpisodeBtn').addEventListener('click', () => {
+    renderEpisodes(Math.floor(Math.max(0, currentIndex - 1) / 30));
+    episodeButtons.find(button => Number(button.dataset.episodeIndex) === currentIndex)?.focus();
+  });
+  node('episodeJumpForm').addEventListener('submit', event => {
+    event.preventDefault();
+    const index = Number(node('jumpEpisode').value);
+    if (!Number.isInteger(index) || index < 1 || index > episodes.length) {
+      node('jumpEpisode').setCustomValidity('请输入 1 至 ' + episodes.length + ' 之间的集号');
+      node('jumpEpisode').reportValidity();
+      return;
+    }
+    node('jumpEpisode').setCustomValidity('');
+    playEpisode(index);
+    closeEpisodePanel();
+  });
+  node('jumpEpisode').addEventListener('input', () => node('jumpEpisode').setCustomValidity(''));
+  node('playerPreferencesBtn').addEventListener('click', () => {
+    node('playerPreferences').hidden = !node('playerPreferences').hidden;
+    node('playerPreferencesBtn').setAttribute('aria-expanded', String(!node('playerPreferences').hidden));
+    if (!node('playerPreferences').hidden) node('playerPreferences').scrollIntoView({block: 'nearest'});
+  });
+  document.addEventListener('dialoglayerchange', event => {
+    if (event.detail !== 'episodes') {
+      const wasOpen = panel.classList.contains('episodes-open');
+      panel.classList.remove('episodes-open');
+      node('toggleEpisodesBtn').setAttribute('aria-expanded', 'false');
+      if (wasOpen && panel.open) node('toggleEpisodesBtn').focus({preventScroll: true});
+    } else if (panel.open) {
+      panel.classList.add('episodes-open');
+      node('toggleEpisodesBtn').setAttribute('aria-expanded', 'true');
+    }
+  });
+  panel.addEventListener('close', () => {
+    panel.classList.remove('episodes-open');
+    node('playerPreferences').hidden = true;
+    node('playerPreferencesBtn').setAttribute('aria-expanded', 'false');
+    node('toggleEpisodesBtn').setAttribute('aria-expanded', 'false');
+  });
+  try {
+    node('autoNextEpisode').checked = localStorage.getItem('duanju.playback.autoNext') !== 'false';
+    const rate = localStorage.getItem('duanju.playback.rate');
+    if (Array.from(node('playbackRate').options).some(option => option.value === rate)) node('playbackRate').value = rate;
+  } catch (_) {}
+  node('autoNextEpisode').addEventListener('change', () => {try {localStorage.setItem('duanju.playback.autoNext', String(node('autoNextEpisode').checked));} catch (_) {}});
+  node('playbackRate').addEventListener('change', () => {try {localStorage.setItem('duanju.playback.rate', node('playbackRate').value);} catch (_) {}});
+  const pip = node('pictureInPictureBtn');
+  pip.hidden = !document.pictureInPictureEnabled || typeof video.requestPictureInPicture !== 'function';
+  pip.title = '画中画展示视频，网页弹幕留在当前页面';
+  pip.addEventListener('click', async () => {
+    try {
+      if (document.pictureInPictureElement === video) await document.exitPictureInPicture();
+      else await video.requestPictureInPicture();
+    } catch (_) {statusText.textContent = '画中画暂不可用，请先开始播放。';}
+  });
+  document.addEventListener('keydown', event => {
+    if (!panel.open || event.defaultPrevented || event.repeat || event.ctrlKey || event.metaKey || event.altKey) return;
+    if (event.target === video || event.target.closest?.('input,select,textarea,button,summary,[contenteditable=true]')) return;
+    if (event.code === 'Space') {event.preventDefault(); video.paused ? video.play().catch(() => {}) : video.pause();}
+    else if (['ArrowLeft', 'ArrowRight'].includes(event.key) && !loading && Number.isFinite(video.duration)) {
+      event.preventDefault();
+      video.currentTime = Math.min(video.duration, Math.max(0, video.currentTime + (event.key === 'ArrowRight' ? 5 : -5)));
+    } else if (event.key.toLowerCase() === 'f' && !node('playerFullscreenBtn').hidden) {
+      event.preventDefault();
+      node('playerFullscreenBtn').click();
+    }
+  });
+  document.addEventListener('visibilitychange', schedulePrefetchStatus);
+
   window.dramaPlayer = {open, openCollection, openHistory, updateDependency};
 })();

@@ -52,6 +52,8 @@ func selectHongguoAppMedia(model map[string]any) (providerMedia, error) {
 	var selected providerMedia
 	bestQuality := -1
 	var keyErr error
+	choices := make(map[int]providerMedia)
+	scores := make(map[int]int)
 	for _, row := range variants {
 		variant, _ := row.(map[string]any)
 		meta := nestedMap(variant, "video_meta")
@@ -77,16 +79,26 @@ func selectHongguoAppMedia(model map[string]any) (providerMedia, error) {
 		height, _ := strconv.Atoi(mapString(meta, "vheight"))
 		if definition, err := strconv.Atoi(hongguoQualityNumber.FindString(mapString(meta, "definition"))); err == nil && definition > 0 {
 			height = definition
+		} else if width, _ := strconv.Atoi(mapString(meta, "vwidth")); width > 0 && (height == 0 || width < height) {
+			height = width
 		}
+		media.Quality = height
 		quality := height * 10
 		if codec == "h264" || codec == "avc1" {
 			quality++
+		}
+		if previous, exists := scores[height]; !exists || quality > previous {
+			choices[height], scores[height] = media, quality
 		}
 		if selected.URL == "" || quality > bestQuality {
 			selected, bestQuality = media, quality
 		}
 	}
 	if selected.URL != "" {
+		for _, media := range choices {
+			selected.Variants = append(selected.Variants, media)
+		}
+		sort.Slice(selected.Variants, func(i, j int) bool { return selected.Variants[i].Quality > selected.Variants[j].Quality })
 		return selected, nil
 	}
 	if keyErr != nil {

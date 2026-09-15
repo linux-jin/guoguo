@@ -42,7 +42,7 @@ func TestHongguoCatalogContinuesAfterRestartWithoutReplacingHistory(t *testing.T
 		body, _ := json.Marshal(map[string]any{"data": map[string]any{
 			"next_offset": payload.Offset + 18, "session_id": "fixture-" + genre, "has_more": payload.Offset == 0,
 			"video_data": []any{map[string]any{
-				"series_id": id, "series_title": fmt.Sprintf("目录剧 %s", id), "first_visible_time": "1773662280", "hot_score": "20019", "series_play_cnt": "0",
+				"series_id": id, "series_title": fmt.Sprintf("目录剧 %s", id), "series_cover": coverAddressFixture, "first_visible_time": "1773662280", "hot_score": "20019", "series_play_cnt": "0",
 			}},
 		}})
 		return rankingHTTPResponse(request, 200, string(body)), nil

@@ -16,6 +16,8 @@ type providerMedia struct {
 	Playlist string
 	HLSKey   []byte
 	CENCKey  []byte
+	Quality  int
+	Variants []providerMedia
 }
 
 func (d *Downloader) providerBaseURL(source string) string {

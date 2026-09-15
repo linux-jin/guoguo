@@ -71,6 +71,7 @@ func (d *Downloader) resolveHongguoPlaybackAPI(ctx context.Context, seriesID, vi
 	var selected providerMedia
 	bestQuality := -1
 	var keyErr error
+	var variants []providerMedia
 	for _, option := range response.KeyURLs {
 		mediaURL := strings.TrimSpace(option.URL)
 		if len(mediaURL) > 8192 || !isProviderHTTPMediaURL(mediaURL) {
@@ -87,12 +88,15 @@ func (d *Downloader) resolveHongguoPlaybackAPI(ctx context.Context, seriesID, vi
 			continue
 		}
 		quality, _ := strconv.Atoi(hongguoQualityNumber.FindString(option.Name))
+		media := providerMedia{URL: mediaURL, Referer: "https://novel.snssdk.com/", CENCKey: key, Quality: quality}
+		variants = append(variants, media)
 		if selected.URL == "" || quality > bestQuality {
-			selected = providerMedia{URL: mediaURL, Referer: "https://novel.snssdk.com/", CENCKey: key}
+			selected = media
 			bestQuality = quality
 		}
 	}
 	if selected.URL != "" {
+		selected.Variants = variants
 		return selected, nil
 	}
 	if keyErr != nil {

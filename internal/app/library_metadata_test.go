@@ -54,7 +54,7 @@ func TestSortMetadataSelectionAndResume(t *testing.T) {
 	for index := 0; index < 60; index++ {
 		rows = append(rows, Drama{ID: fmt.Sprintf("hongguo:%019d", index+1), Source: sourceHongguo})
 	}
-	rows[1].SortMetadata = &sortMetadataState{Version: sortMetadataVersion, CheckedAt: now}
+	rows[1].SortMetadata = &sortMetadataState{Version: sortMetadataVersion, CheckedAt: now, CoverChecked: true}
 	rows[2].SortMetadata = &sortMetadataState{CheckedAt: now}
 	rows = append(rows, Drama{ID: "huangdou:other", Source: sourceHuangdou})
 	batch := selectSortMetadataBatch(rows, sourceHongguo, []string{rows[59].ID, rows[59].ID, rows[2].ID, "huangdou:other"}, now)

@@ -33,6 +33,9 @@ type playbackSession struct {
 	currentIndex    int
 	prefetchVersion uint64
 	prefetch        *playbackPrefetch
+	native          *playbackNative
+	quality         int
+	streamVersion   uint64
 	openedAt        time.Time
 	historySequence uint64
 	historyRuns     map[uint64]playbackHistoryRun
@@ -61,6 +64,9 @@ func (app *UIApp) registerPlaybackRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/ui/playback/open", app.handlePlaybackOpen)
 	mux.HandleFunc("/api/ui/playback/prepare", app.handlePlaybackPrepare)
 	mux.HandleFunc("/api/ui/playback/stream", app.handlePlaybackStream)
+	mux.HandleFunc("/api/ui/playback/hls/open", app.handlePlaybackNativeOpen)
+	mux.HandleFunc("/api/ui/playback/hls/index.m3u8", app.handlePlaybackNativeAsset)
+	mux.HandleFunc("/api/ui/playback/hls/segment.ts", app.handlePlaybackNativeAsset)
 	mux.HandleFunc("/api/ui/playback/control", app.handlePlaybackControl)
 	mux.HandleFunc("/api/ui/playback/status", app.handlePlaybackStatus)
 	mux.HandleFunc("/api/ui/playback/prefetch", app.handlePlaybackPrefetch)
@@ -68,7 +74,6 @@ func (app *UIApp) registerPlaybackRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/ui/playback/history", app.handlePlaybackHistory)
 	mux.HandleFunc("/api/ui/playback/history/remove", app.handlePlaybackHistoryRemove)
 	mux.HandleFunc("/api/ui/playback/progress", app.handlePlaybackProgress)
-	mux.Handle("/assets/", playbackAssets())
 }
 
 func playbackRequestAllowed(writer http.ResponseWriter, request *http.Request, method string) bool {
@@ -344,6 +349,13 @@ func (app *UIApp) playbackStatus(id string, touch bool) (playbackView, bool) {
 		app.touchPlaybackLocked(session)
 	}
 	view := playbackView{State: session.state, Error: session.error, Run: session.run, Duration: session.duration}
+	if session.native != nil {
+		state, err := session.native.state()
+		view.State = state
+		if err != nil {
+			view.Error = app.redactError(err)
+		}
+	}
 	if session.prefetch != nil {
 		view.Prefetch = session.prefetch.view()
 	}
@@ -403,90 +415,27 @@ func (app *UIApp) handlePlaybackStream(writer http.ResponseWriter, request *http
 		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "集数或播放位置无效"})
 		return
 	}
-	id := query.Get("session")
-	app.playbackMu.Lock()
-	session := app.playbacks[id]
-	if session == nil {
-		app.playbackMu.Unlock()
-		writeJSON(writer, http.StatusGone, map[string]string{"error": "播放会话已过期，请重新打开本剧"})
+	quality, qualityErr := parsePlaybackQuality(query.Get("quality"))
+	version, versionErr := strconv.ParseUint(firstNonEmpty(query.Get("version"), "0"), 10, 64)
+	if qualityErr != nil || versionErr != nil {
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "清晰度或播放请求编号无效"})
 		return
 	}
-	if index > len(session.tasks) {
-		app.playbackMu.Unlock()
-		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "分集不存在"})
+	run, status, err := app.beginPlayback(request.Context(), query.Get("session"), index, offset, quality, version, false)
+	if err != nil {
+		writeJSON(writer, status, map[string]string{"error": err.Error()})
 		return
 	}
-	downloadID := ""
-	if len(session.downloadIDs) > 0 {
-		if !session.prepared[index] {
-			app.playbackMu.Unlock()
-			writeJSON(writer, http.StatusConflict, map[string]string{"error": "请先选择要播放的分集"})
-			return
-		}
-		downloadID = session.downloadIDs[index-1]
-	}
-	previousCancel := session.cancel
-	cache := session.prefetch
-	session.prefetch = nil
-	if cache != nil && (offset != 0 || cache.episode != index || cache.fromRun != session.run) {
-		cache.cancel()
-		cache = nil
-	}
-	ctx, cancel := context.WithCancel(request.Context())
-	stop := func() {
-		cancel()
-		if cache != nil {
-			cache.cancel()
-		}
-	}
-	session.cancel = stop
-	session.run++
-	session.currentIndex = index
-	if session.historyRuns == nil {
-		session.historyRuns = make(map[uint64]playbackHistoryRun)
-	}
-	session.historyRuns[session.run] = playbackHistoryRun{episode: index}
-	for oldRun := range session.historyRuns {
-		if session.run > oldRun && session.run-oldRun > 8 {
-			delete(session.historyRuns, oldRun)
-		}
-	}
-	session.prefetchVersion = 0
-	run := session.run
-	task := session.tasks[index-1]
-	session.state, session.error, session.duration = "buffering", "", 0
-	app.touchPlaybackLocked(session)
-	app.playbackMu.Unlock()
-	if previousCancel != nil {
-		previousCancel()
-	}
-	defer stop()
-	startupTimer := time.AfterFunc(90*time.Second, cancel)
+	defer run.stop()
+	startupTimer := time.AfterFunc(90*time.Second, run.cancel)
 	defer startupTimer.Stop()
 	ready := func(duration float64) {
 		startupTimer.Stop()
-		app.playbackMu.Lock()
-		if current := app.playbacks[id]; current == session && current.run == run {
-			current.state, current.duration = "streaming", duration
-			current.historyRuns[run] = playbackHistoryRun{episode: index, duration: duration}
-		}
-		app.playbackMu.Unlock()
+		app.playbackRunReady(run, duration)
 	}
-	used, err := app.servePrefetchedPlayback(ctx, writer, cache, run, ready)
+	used, err := app.servePrefetchedPlayback(run.ctx, writer, run.cache, run.run, ready)
 	if !used {
-		err = app.streamPlayback(ctx, cancel, writer, task, downloadID, offset, run, ready)
+		err = app.streamPlayback(run.ctx, run.cancel, writer, run.task, run.downloadID, offset, run.run, ready)
 	}
-	app.playbackMu.Lock()
-	if current := app.playbacks[id]; current == session && current.run == run {
-		current.cancel = nil
-		current.state = "ended"
-		if err != nil {
-			current.state = "failed"
-			current.error = app.redactError(err)
-			if request.Context().Err() != nil {
-				current.state = "stopped"
-			}
-		}
-	}
-	app.playbackMu.Unlock()
+	app.finishPlaybackRun(run, err, request.Context().Err() != nil)
 }

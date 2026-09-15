@@ -70,6 +70,7 @@ func (a *UIApp) acceptRankingDramas(page rankingPage) {
 	for _, item := range page.Items {
 		fresh = append(fresh, item.Drama)
 	}
+	a.normalizeDramaCovers(fresh)
 	newDramas := a.newSortMetadataDramasLocked(fresh)
 	if page.Stale {
 		a.dramas = mergeLoadedDramas(fresh, a.dramas, nil)

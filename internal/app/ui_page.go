@@ -8,6 +8,6 @@ import (
 
 var uiHTML = webui.HTML
 
-func playbackAssets() http.Handler {
-	return http.StripPrefix("/assets/", http.FileServer(http.FS(webui.PlayerAssets)))
+func webAssets() http.Handler {
+	return http.StripPrefix("/assets/", http.FileServer(http.FS(webui.Assets)))
 }

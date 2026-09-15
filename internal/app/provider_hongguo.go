@@ -243,6 +243,20 @@ func (d *Downloader) resolveHongguoWebMedia(ctx context.Context, seriesID, video
 	return providerMedia{URL: mediaURL, Referer: d.providerBaseURL(sourceHongguo) + "/", Duration: time.Duration(duration * float64(time.Second))}, nil
 }
 
+func hongguoCoverAddress(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || len(value) > 8192 {
+			continue
+		}
+		parsed, err := url.Parse(value)
+		if err == nil && validImageURL(parsed) && isHongguoImageHost(parsed.Hostname()) {
+			return value
+		}
+	}
+	return ""
+}
+
 func hongguoDramaFromAny(v any, category string) Drama {
 	m, ok := v.(map[string]any)
 	if !ok {

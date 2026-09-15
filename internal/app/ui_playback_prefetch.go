@@ -16,6 +16,8 @@ type playbackPrefetchKey struct{}
 type playbackPrefetch struct {
 	episode int
 	fromRun uint64
+	quality int
+	native  *playbackNative
 	ctx     context.Context
 	cancel  context.CancelFunc
 	chunks  chan []byte
@@ -88,6 +90,25 @@ func (cache *playbackPrefetch) finish(err error) {
 }
 
 func (cache *playbackPrefetch) view() *playbackPrefetchView {
+	if cache.native != nil {
+		state, _ := cache.native.state()
+		switch state {
+		case "ended":
+			state = "ready"
+		case "failed", "stopped":
+			state = "failed"
+		case "streaming":
+			state = "buffering"
+			select {
+			case <-cache.native.firstBatch:
+				state = "partial"
+			default:
+			}
+		default:
+			state = "preparing"
+		}
+		return &playbackPrefetchView{Episode: cache.episode, State: state}
+	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	state := "preparing"
@@ -126,7 +147,7 @@ func (cache *playbackPrefetch) serve(ctx context.Context, writer http.ResponseWr
 	case <-ctx.Done():
 		return true, ctx.Err()
 	}
-	for _, name := range []string{"Content-Type", "Content-Disposition", "X-Playback-Duration", "X-Playback-Source"} {
+	for _, name := range []string{"Content-Type", "Content-Disposition", "X-Playback-Duration", "X-Playback-Source", "X-Playback-MIME", "X-Playback-Quality", "X-Playback-Qualities"} {
 		if value := header.Get(name); value != "" {
 			writer.Header().Set(name, value)
 		}
@@ -199,7 +220,11 @@ func (app *UIApp) handlePlaybackPrefetch(writer http.ResponseWriter, request *ht
 		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "只能预缓存当前集的下一集"})
 		return
 	}
-	if !input.Cancel && session.state != "ended" {
+	state := session.state
+	if session.native != nil {
+		state, _ = session.native.state()
+	}
+	if !input.Cancel && state != "ended" {
 		app.playbackMu.Unlock()
 		writeJSON(writer, http.StatusConflict, map[string]string{"error": "当前集尚未缓冲完成"})
 		return
@@ -223,11 +248,18 @@ func (app *UIApp) handlePlaybackPrefetch(writer http.ResponseWriter, request *ht
 		return
 	}
 	cache := newPlaybackPrefetch(input.Episode, input.Run)
+	cache.quality = session.quality
+	cache.ctx = context.WithValue(cache.ctx, playbackQualityKey{}, cache.quality)
 	session.prefetch = cache
 	task := session.tasks[input.Episode-1]
 	downloadID := ""
 	if len(session.downloadIDs) > 0 {
 		downloadID = session.downloadIDs[input.Episode-1]
+	}
+	if session.native != nil {
+		cache.native = newPlaybackNative(app, cache.ctx, task, downloadID, cache.quality, 0, true)
+		cancel := cache.cancel
+		cache.cancel = func() { cancel(); cache.native.Close() }
 	}
 	if app.playbackPrefetchSlots == nil {
 		app.playbackPrefetchSlots = make(chan struct{}, 1)
@@ -245,9 +277,27 @@ func (app *UIApp) handlePlaybackPrefetch(writer http.ResponseWriter, request *ht
 			cache.finish(cache.ctx.Err())
 			return
 		}
-		defer cache.cancel()
 		startup := time.AfterFunc(60*time.Second, cache.cancel)
 		defer startup.Stop()
+		if cache.native != nil {
+			cache.native.start()
+			_, err := cache.native.segment(cache.ctx, 0)
+			startup.Stop()
+			if err == nil {
+				select {
+				case <-cache.native.firstBatch:
+					_, err = cache.native.state()
+				case <-cache.ctx.Done():
+					err = cache.ctx.Err()
+				}
+			}
+			if err != nil {
+				cache.cancel()
+			}
+			cache.finish(err)
+			return
+		}
+		defer cache.cancel()
 		err := app.streamPlayback(cache.ctx, cache.cancel, cache, task, downloadID, 0, 0, func(float64) { startup.Stop() })
 		cache.finish(err)
 	}()

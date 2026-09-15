@@ -285,6 +285,12 @@ func mergeDramaMetadata(base, extra Drama) Drama {
 	if base.ReleaseStatus == "" || base.ReleaseStatus == "unknown" {
 		base.ReleaseStatus = extra.ReleaseStatus
 	}
+	if dramaProvider(base) == sourceHuangguoAI && base.ID == extra.ID {
+		_, sourceID, _ := splitProviderDramaID(base.ID)
+		if title := firstHuangguoTitle(sourceID, base.Title, base.Name, extra.Title, extra.Name); title != "" {
+			base.Title, base.Name = title, title
+		}
+	}
 	return base
 }
 
@@ -625,16 +631,21 @@ func providerRefererForURL(candidate, fallback string) string {
 }
 
 func parseHuangguoAIDramaCards(rawHTML, pageURL, category string) []Drama {
-	seen := map[string]bool{}
+	positions := map[string]int{}
 	var out []Drama
 	add := func(dr Drama) {
-		if dr.ID == "" || dr.SourceID == "" || seen[dr.SourceID] {
+		if dr.ID == "" || dr.SourceID == "" {
 			return
 		}
-		seen[dr.SourceID] = true
+		if position, found := positions[dr.SourceID]; found {
+			out[position] = mergeDramaMetadata(out[position], dr)
+			return
+		}
+		positions[dr.SourceID] = len(out)
 		out = append(out, dr)
 	}
-	for _, block := range splitHuangguoAICardBlocks(rawHTML) {
+	markup := huangguoNonContent.ReplaceAllString(rawHTML, "")
+	for _, block := range splitHuangguoAICardBlocks(markup) {
 		sourceID := cleanID(firstNonEmpty(extractAttr(block, "data-track-id"), detailIDFromString(extractAttr(block, "href"))))
 		if sourceID == "" {
 			if m := reDetailHref.FindStringSubmatch(block); len(m) > 2 {
@@ -644,11 +655,12 @@ func parseHuangguoAIDramaCards(rawHTML, pageURL, category string) []Drama {
 		if sourceID == "" {
 			continue
 		}
-		title := firstNonEmpty(extractAttr(block, "data-track-title"), extractAttr(block, "alt", "title", "aria-label"), extractByClassText(block, "hg-drama-card__title"), titleNearDetail(rawHTML, sourceID))
+		title := huangguoCardTitle(block, sourceID)
 		cover := resolveProviderURL(pageURL, firstNonEmpty(extractAttr(block, "data-src"), extractAttr(block, "data-original"), extractAttr(block, "src")))
 		desc := firstNonEmpty(extractByClassText(block, "hg-drama-card__desc"), extractDescription(block))
 		score := firstNonEmpty(extractByClassText(block, "hg-drama-card__score"), firstMatchText(reScoreText, block))
-		episode := extractByClassText(block, "hg-drama-card__episode")
+		episodeBlock := huangguoClassBlock(block, "hg-drama-card__episode")
+		episode := firstNonEmpty(extractAttr(episodeBlock, "data-ep-base"), cleanText(episodeBlock))
 		badge := extractByClassText(block, "hg-drama-card__badge")
 		remark := strings.TrimSpace(strings.Join(nonEmptyStrings(badge, episode), " "))
 		if remark == "" {
@@ -668,14 +680,17 @@ func parseHuangguoAIDramaCards(rawHTML, pageURL, category string) []Drama {
 		}
 		add(dr)
 	}
-	for _, m := range reDetailHref.FindAllStringSubmatchIndex(rawHTML, -1) {
+	for _, m := range reDetailHref.FindAllStringSubmatchIndex(markup, -1) {
 		if len(m) < 6 || m[4] < 0 || m[5] < 0 {
 			continue
 		}
-		sourceID := cleanID(rawHTML[m[4]:m[5]])
-		block := contextBlock(rawHTML, m[0], m[1], 1600)
-		title := firstNonEmpty(extractClosestAttr(rawHTML, m[0], m[1], "title", "alt", "aria-label", "data-track-title"), extractByClassText(block, "hg-drama-card__title"), titleNearDetail(rawHTML, sourceID), cleanText(block))
-		cover := resolveProviderURL(pageURL, extractClosestAttr(rawHTML, m[0], m[1], "data-src", "data-original", "src"))
+		sourceID := cleanID(markup[m[4]:m[5]])
+		block := markup[m[0]:m[1]]
+		title := firstHuangguoTitle(sourceID, huangguoCardTitle(block, sourceID), cleanText(block))
+		if title == "" {
+			continue
+		}
+		cover := resolveProviderURL(pageURL, extractAttr(block, "data-src", "data-original", "src"))
 		add(Drama{ID: providerDramaID(sourceHuangguoAI, sourceID), Source: sourceHuangguoAI, SourceID: sourceID, Title: title, Name: title, Cover: cover, CoverURL: cover, CategoryName: category, ChannelName: "huangguoai.com"})
 	}
 	for _, dr := range parseHuangguoAIJSONLDDramas(rawHTML, category) {
@@ -691,10 +706,8 @@ func splitHuangguoAICardBlocks(raw string) []string {
 		end := len(raw)
 		if i+1 < len(starts) {
 			end = starts[i+1][0]
-		} else if m[0]+6000 < end {
-			end = m[0] + 6000
 		}
-		blocks = append(blocks, raw[m[0]:end])
+		blocks = append(blocks, huangguoElementBlock(raw[:end], m[0], m[1], "div"))
 	}
 	return blocks
 }
@@ -721,7 +734,7 @@ func parseHuangguoAIJSONLDDramas(raw, category string) []Drama {
 				name, _ := x["name"].(string)
 				itemURL, _ := x["url"].(string)
 				id := detailIDFromString(itemURL)
-				if id != "" && name != "" && !seen[id] {
+				if id != "" && !huangguoTitleNeedsRepair(name, id) && !seen[id] {
 					seen[id] = true
 					title := cleanText(name)
 					out = append(out, Drama{ID: providerDramaID(sourceHuangguoAI, id), Source: sourceHuangguoAI, SourceID: id, Title: title, Name: title, CategoryName: category, ChannelName: "huangguoai.com"})
@@ -751,9 +764,12 @@ func parseHuangguoAIJSONCards(raw []byte, pageURL, category string) []Drama {
 				walk(item)
 			}
 		case map[string]any:
-			if dr, ok := dramaFromAIMap(x, pageURL, category); ok && !seen[dr.SourceID] {
-				seen[dr.SourceID] = true
-				out = append(out, dr)
+			if dr, ok := dramaFromAIMap(x, pageURL, category); ok {
+				if !seen[dr.SourceID] {
+					seen[dr.SourceID] = true
+					out = append(out, dr)
+				}
+				return
 			}
 			for _, child := range x {
 				walk(child)
@@ -784,9 +800,12 @@ func dramaFromAIMap(m map[string]any, pageURL, category string) (Drama, bool) {
 		return Drama{}, false
 	}
 	title := firstNonEmpty(mapString(m, "title"), mapString(m, "name"), mapString(m, "videoTitle"), mapString(m, "video_title"), mapString(m, "videoName"), mapString(m, "video_name"))
+	if huangguoTitleNeedsRepair(title, sourceID) {
+		return Drama{}, false
+	}
 	cover := resolveProviderURL(pageURL, firstNonEmpty(mapString(m, "cover"), mapString(m, "coverUrl"), mapString(m, "cover_url"), mapString(m, "coverImage"), mapString(m, "cover_image"), mapString(m, "image"), mapString(m, "imageUrl"), mapString(m, "thumbnail"), mapString(m, "poster"), mapString(m, "posterUrl")))
 	desc := firstNonEmpty(mapString(m, "desc"), mapString(m, "description"), mapString(m, "intro"), mapString(m, "summary"))
-	eps := firstNonEmpty(mapString(m, "episode_count"), mapString(m, "episodeCount"), mapString(m, "episodes"), mapString(m, "total"))
+	eps := huangguoMapEpisodes(m)
 	remark := firstNonEmpty(mapString(m, "vod_remarks"), mapString(m, "remark"), mapString(m, "remarks"))
 	if remark == "" && eps != "" {
 		if strings.EqualFold(mapString(m, "is_finished"), "true") || mapString(m, "is_finished") == "1" {

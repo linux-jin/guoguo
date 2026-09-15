@@ -3,14 +3,11 @@ package app
 import (
 	"bufio"
 	"context"
-	"crypto/aes"
 	"crypto/tls"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -37,6 +34,7 @@ type Downloader struct {
 	legacyOnce      sync.Once
 	legacy          *legacyAPIClient
 	rankings        rankingCache
+	diagnostics     *diagnosticLog
 }
 
 func NewDownloader(cfg Config) *Downloader {
@@ -73,14 +71,19 @@ func NewDownloader(cfg Config) *Downloader {
 	transport.Proxy = router.proxy
 	resolver := newSafeDNSDialer(transport)
 	transport.DialContext = resolver.DialContext
-	return &Downloader{cfg: cfg, client: &http.Client{Transport: newCDNTransport(transport, resolver), Timeout: 45 * time.Second}, providerHosts: map[string]string{}, limiter: newRequestLimiter(cfg.RequestConcurrency, time.Duration(cfg.RequestIntervalMS)*time.Millisecond), proxyRouter: router}
+	return &Downloader{cfg: cfg, client: &http.Client{Transport: newCDNTransport(transport, resolver), Timeout: 45 * time.Second}, providerHosts: map[string]string{}, limiter: newRequestLimiter(cfg.RequestConcurrency, time.Duration(cfg.RequestIntervalMS)*time.Millisecond), proxyRouter: router, diagnostics: newDiagnosticLog(cfg.dataDirectory())}
 }
 
 func (d *Downloader) DownloadEpisode(ctx context.Context, task Task) error {
 	return d.DownloadEpisodeWithProgress(ctx, task, nil)
 }
 
-func (d *Downloader) DownloadEpisodeWithProgress(ctx context.Context, task Task, callback func(DownloadProgress)) error {
+func (d *Downloader) DownloadEpisodeWithProgress(ctx context.Context, task Task, callback func(DownloadProgress)) (resultErr error) {
+	defer func() {
+		if ctx.Err() == nil {
+			d.recordTaskFailure("download.failed", task, 0, resultErr)
+		}
+	}()
 	if isHuangguoProviderSource(task.Chapter.Source) || task.Chapter.PageURL != "" || isProviderHTTPMediaURL(task.Chapter.VideoURL) || strings.HasPrefix(task.Chapter.VideoURL, "hongguo-cenc://") {
 		return d.downloadHuangguoProviderMediaWithProgress(ctx, task, callback)
 	}
@@ -111,20 +114,6 @@ func (d *Downloader) DownloadEpisodeWithProgress(ctx context.Context, task Task,
 	if err := os.MkdirAll(filepath.Dir(task.OutPath), 0o755); err != nil {
 		return err
 	}
-	cleanVideoURL := strings.TrimLeft(task.Chapter.VideoURL, "/")
-	base, err := d.apiEndpoint(ctx)
-	if err != nil {
-		return err
-	}
-	access, err := d.legacyCredentials(ctx)
-	if err != nil {
-		return err
-	}
-	m3u8URL := fmt.Sprintf("%s/api/app/vid/h5/m3u8/%s?token=%s&c=%s", base, cleanVideoURL, url.QueryEscape(access.Token), url.QueryEscape(d.cfg.CDNURL))
-	keyBytes, err := hex.DecodeString(d.cfg.AESKeyHex)
-	if err != nil || len(keyBytes) != aes.BlockSize {
-		return errors.New("原 API 下载需要有效的 aesKeyHex 配置")
-	}
 	progress := newDownloadProgressState(partPath, task.OutPath, task.Chapter.MediaSize, callback)
 	progress.report("downloading", true)
 	var lastErr error
@@ -133,14 +122,14 @@ func (d *Downloader) DownloadEpisodeWithProgress(ctx context.Context, task Task,
 			return err
 		}
 		func() {
-			raw, fetchErr := d.fetchRaw(ctx, m3u8URL)
-			if fetchErr != nil {
-				lastErr = fetchErr
+			media, key, resolveErr := d.resolvePlaybackMedia(ctx, task)
+			if resolveErr != nil {
+				lastErr = resolveErr
 				return
 			}
-			progress.setMediaTotal(m3u8Duration(raw))
+			progress.setMediaTotal(media.Duration)
 			progress.report("downloading", true)
-			proxy, err := d.newHLSProxy(ctx, providerMedia{URL: m3u8URL, Playlist: raw, Referer: legacyFrontendURL + "/"}, keyBytes)
+			proxy, err := d.newHLSProxy(ctx, media, key)
 			if err != nil {
 				lastErr = err
 				return

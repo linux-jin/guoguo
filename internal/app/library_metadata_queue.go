@@ -128,10 +128,15 @@ func (a *UIApp) runSortMetadataQueue(ctx context.Context, done chan struct{}) {
 		itemCtx, cancel := context.WithTimeout(ctx, 40*time.Second)
 		patch, err := a.downloader.fetchDramaSortMetadata(itemCtx, previous)
 		cancel()
+		if err != nil && ctx.Err() == nil {
+			a.downloader.recordDiagnostic(diagnosticEvent{Event: "metadata.failed", Source: dramaProvider(previous), DramaID: previous.ID, DramaTitle: previous.DisplayTitle(), Message: err.Error()})
+		}
 		patch.SortMetadata = &sortMetadataState{CheckedAt: time.Now()}
 		if err == nil {
-			patch.SortMetadata.Version = sortMetadataVersion
+			patch.SortMetadata.Version = dramaSortMetadataVersion(previous)
+			patch.SortMetadata.CoverChecked = dramaProvider(previous) == sourceHongguo
 		}
+		normalizeDramaCover(&patch)
 		a.mu.Lock()
 		if ctx.Err() != nil {
 
@@ -143,12 +148,15 @@ func (a *UIApp) runSortMetadataQueue(ctx context.Context, done chan struct{}) {
 			if drama.ID != id {
 				continue
 			}
-			if patch.OnlineDate != "" && patch.OnlineDate != drama.OnlineDate || patch.Heat != "" && patch.Heat != drama.Heat || patch.Views != "" && patch.Views != drama.Views {
+			_, sourceID, _ := splitProviderDramaID(drama.ID)
+			if dramaProvider(drama) != sourceHuangguoAI || firstHuangguoTitle(sourceID, drama.Title, drama.Name) != "" {
+				patch.Title, patch.Name = drama.Title, drama.Name
+			}
+			updated := mergeDramaMetadata(patch, drama)
+			if patch.OnlineDate != "" && patch.OnlineDate != drama.OnlineDate || patch.Heat != "" && patch.Heat != drama.Heat || patch.Views != "" && patch.Views != drama.Views || bestDramaCover(patch) != "" && bestDramaCover(patch) != bestDramaCover(drama) || huangguoContentChanged(drama, updated) {
 				a.libraryMetadata.Updated++
 			}
-
-			patch.Title, patch.Name = drama.Title, drama.Name
-			a.dramas[index] = mergeDramaMetadata(patch, drama)
+			a.dramas[index] = updated
 			break
 		}
 		a.libraryMetadata.Checked++

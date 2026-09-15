@@ -201,9 +201,9 @@ func TestUnifiedUpdateReturnsImmediatelyAndDeduplicatesWork(t *testing.T) {
 		d.hongguoClient().state.Feeds[genre.key] = hongguoCatalogCursor{Initialized: true, Exhausted: true, Offset: 18}
 	}
 	app := &UIApp{downloader: d, cfg: d.cfg, libraryAttempted: true, libraryApp: d.hongguoCatalogSnapshot(), librarySources: map[string]librarySourceState{}}
-	app.dramas = append(app.dramas, Drama{ID: "hongguo:790000", Source: sourceHongguo, Title: "已完成的目录条目", OnlineDate: "2026-03-16", Heat: "20", Views: "0", SortMetadata: &sortMetadataState{Version: sortMetadataVersion}})
+	app.dramas = append(app.dramas, Drama{ID: "hongguo:790000", Source: sourceHongguo, Title: "已完成的目录条目", Cover: coverAddressFixture, OnlineDate: "2026-03-16", Heat: "20", Views: "0", SortMetadata: &sortMetadataState{Version: sortMetadataVersion}})
 	for index := 0; index < 60; index++ {
-		app.dramas = append(app.dramas, Drama{ID: fmt.Sprintf("hongguo:%d", 800000+index), Source: sourceHongguo, Title: "历史文字样本", Heat: "20", Views: "0"})
+		app.dramas = append(app.dramas, Drama{ID: fmt.Sprintf("hongguo:%d", 800000+index), Source: sourceHongguo, Title: "历史文字样本", Cover: coverAddressFixture, Heat: "20", Views: "0"})
 	}
 	t.Cleanup(func() {
 		releaseCatalog()

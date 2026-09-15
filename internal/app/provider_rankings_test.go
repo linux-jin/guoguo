@@ -308,8 +308,8 @@ func TestLiveRankingsMetadata(t *testing.T) {
 				t.Fatalf("no live ranking entries: %v", err)
 			}
 			for _, item := range result.Items {
-				if item.Drama.Cover != nil || item.Drama.CoverURL != nil {
-					t.Fatal("ranking verification must not collect images")
+				if address := bestDramaCover(item.Drama); address != "" && (item.Drama.Source != sourceHongguo || hongguoCoverAddress(address) != address) {
+					t.Fatal("ranking metadata must retain only a validated cover address")
 				}
 			}
 			t.Logf("%s: %d entries, ranks %d–%d, more=%v", board.Name, len(result.Items), result.Items[0].Rank, result.Items[len(result.Items)-1].Rank, result.HasMore)

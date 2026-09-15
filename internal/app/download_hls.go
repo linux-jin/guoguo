@@ -23,18 +23,20 @@ type hlsAsset struct {
 }
 
 type hlsProxy struct {
-	client   *http.Client
-	server   *http.Server
-	base     string
-	referer  string
-	key      []byte
-	mediaKey []byte
-	mu       sync.Mutex
-	assets   map[string]hlsAsset
-	assetIDs map[string]string
-	failure  error
-	root     string
-	retries  int
+	client     *http.Client
+	server     *http.Server
+	base       string
+	referer    string
+	key        []byte
+	mediaKey   []byte
+	mu         sync.Mutex
+	assets     map[string]hlsAsset
+	assetIDs   map[string]string
+	failure    error
+	root       string
+	retries    int
+	host       string
+	diagnostic func(diagnosticEvent)
 }
 
 var hlsURIAttribute = regexp.MustCompile(`URI="([^"]+)"`)
@@ -49,14 +51,18 @@ func (d *Downloader) newHLSProxy(ctx context.Context, media providerMedia, key [
 		return nil, fmt.Errorf("创建本地 HLS 转发失败: %w", err)
 	}
 	proxy := &hlsProxy{
-		client:   &http.Client{Transport: d.client.Transport},
-		base:     "http://" + listener.Addr().String() + "/" + nonce + "/",
-		referer:  media.Referer,
-		key:      key,
-		mediaKey: media.HLSKey,
-		assets:   map[string]hlsAsset{},
-		assetIDs: map[string]string{},
-		retries:  d.cfg.Retries,
+		client:     &http.Client{Transport: d.client.Transport},
+		base:       "http://" + listener.Addr().String() + "/" + nonce + "/",
+		referer:    media.Referer,
+		key:        key,
+		mediaKey:   media.HLSKey,
+		assets:     map[string]hlsAsset{},
+		assetIDs:   map[string]string{},
+		retries:    d.cfg.Retries,
+		diagnostic: d.recordDiagnostic,
+	}
+	if remote, err := url.Parse(media.URL); err == nil {
+		proxy.host = remote.Hostname()
 	}
 	proxy.root = proxy.addAsset(hlsAsset{remote: media.URL, body: []byte(media.Playlist), playlist: media.Playlist != ""})
 	proxy.server = &http.Server{
@@ -81,11 +87,18 @@ func (proxy *hlsProxy) Err() error {
 }
 
 func (proxy *hlsProxy) recordError(err error) {
+	if err == nil {
+		return
+	}
 	proxy.mu.Lock()
+	first := proxy.failure == nil
 	if proxy.failure == nil {
 		proxy.failure = publicError(err)
 	}
 	proxy.mu.Unlock()
+	if first && proxy.diagnostic != nil {
+		proxy.diagnostic(diagnosticEvent{Event: "media.failed", Host: proxy.host, Message: err.Error()})
+	}
 }
 
 func (proxy *hlsProxy) addAsset(asset hlsAsset) string {
@@ -183,7 +196,7 @@ func (proxy *hlsProxy) ServeHTTP(writer http.ResponseWriter, request *http.Reque
 		}
 		upstream, err := http.NewRequestWithContext(request.Context(), method, asset.remote, nil)
 		if err != nil {
-			proxy.fail(writer, err)
+			proxy.fail(writer, request, err)
 			return
 		}
 		upstream.Header.Set("User-Agent", userAgent)
@@ -199,18 +212,19 @@ func (proxy *hlsProxy) ServeHTTP(writer http.ResponseWriter, request *http.Reque
 		}
 		response, err := proxy.fetch(upstream)
 		if err != nil {
-			proxy.fail(writer, err)
+			proxy.fail(writer, request, err)
 			return
 		}
-		defer response.Body.Close()
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			proxy.fail(writer, fmt.Errorf("HLS 资源请求失败: %s HTTP %d", upstream.URL.Hostname(), response.StatusCode))
+			_ = response.Body.Close()
+			proxy.fail(writer, request, fmt.Errorf("HLS 资源请求失败: %s HTTP %d", upstream.URL.Hostname(), response.StatusCode))
 			return
 		}
 		if asset.playlist || strings.Contains(response.Header.Get("Content-Type"), "mpegurl") {
+			defer response.Body.Close()
 			body, err = io.ReadAll(io.LimitReader(response.Body, providerMaxBodyBytes+1))
 			if err != nil || len(body) > providerMaxBodyBytes {
-				proxy.fail(writer, errors.New("读取 HLS 播放列表失败或内容过大"))
+				proxy.fail(writer, request, errors.New("读取 HLS 播放列表失败或内容过大"))
 				return
 			}
 			asset.playlist = true
@@ -218,24 +232,31 @@ func (proxy *hlsProxy) ServeHTTP(writer http.ResponseWriter, request *http.Reque
 				asset.remote = response.Request.URL.String()
 			}
 		} else {
-			for _, header := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"} {
+			reader := proxy.mediaReader(upstream, response)
+			defer reader.Close()
+			for _, header := range []string{"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Content-Encoding", "ETag", "Last-Modified"} {
 				if value := response.Header.Get(header); value != "" {
 					writer.Header().Set(header, value)
 				}
 			}
 			writer.WriteHeader(response.StatusCode)
-			_, _ = io.Copy(writer, &checkedMediaReader{reader: response.Body, ctx: request.Context(), fail: proxy.recordError})
+			if request.Method == http.MethodHead {
+				return
+			}
+			if _, err := io.Copy(writer, reader); err != nil && reader.failure != nil && request.Context().Err() == nil {
+				proxy.recordError(reader.failure)
+			}
 			return
 		}
 	}
 	if asset.playlist {
 		if !bytes.HasPrefix(bytes.TrimSpace(bytes.TrimPrefix(body, []byte("\ufeff"))), []byte("#EXTM3U")) {
-			proxy.fail(writer, errors.New("上游没有返回有效的 HLS 播放列表"))
+			proxy.fail(writer, request, errors.New("上游没有返回有效的 HLS 播放列表"))
 			return
 		}
 		rewritten, err := proxy.rewritePlaylist(string(body), asset.remote)
 		if err != nil {
-			proxy.fail(writer, err)
+			proxy.fail(writer, request, err)
 			return
 		}
 		body = []byte(rewritten)
@@ -250,13 +271,7 @@ func (proxy *hlsProxy) ServeHTTP(writer http.ResponseWriter, request *http.Reque
 }
 
 func (proxy *hlsProxy) fetch(request *http.Request) (*http.Response, error) {
-	attempts := proxy.retries
-	if attempts < 1 {
-		attempts = 1
-	}
-	if attempts > 3 {
-		attempts = 3
-	}
+	attempts := mediaRequestAttempts(proxy.retries)
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
 		if attempt > 0 {
@@ -280,21 +295,10 @@ func (proxy *hlsProxy) fetch(request *http.Request) (*http.Response, error) {
 	return nil, fmt.Errorf("媒体资源连接失败（%s，已尝试 %d 次；可在代理设置中检测连接）: %w", request.URL.Hostname(), attempts, publicError(lastErr))
 }
 
-type checkedMediaReader struct {
-	reader io.Reader
-	ctx    context.Context
-	fail   func(error)
-}
-
-func (reader *checkedMediaReader) Read(buffer []byte) (int, error) {
-	count, err := reader.reader.Read(buffer)
-	if err != nil && !errors.Is(err, io.EOF) && reader.ctx.Err() == nil {
-		reader.fail(fmt.Errorf("媒体资源读取不完整: %w", err))
+func (proxy *hlsProxy) fail(writer http.ResponseWriter, request *http.Request, err error) {
+	if request.Context().Err() != nil {
+		return
 	}
-	return count, err
-}
-
-func (proxy *hlsProxy) fail(writer http.ResponseWriter, err error) {
 	proxy.recordError(err)
 	http.Error(writer, "上游媒体请求失败", http.StatusBadGateway)
 }

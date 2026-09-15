@@ -14,9 +14,10 @@ const sortMetadataBatchSize = 40
 const sortMetadataRetryDelay = 5 * time.Minute
 
 type sortMetadataState struct {
-	Version   int       `json:"version"`
-	CheckedAt time.Time `json:"checkedAt"`
-	Pending   bool      `json:"pending,omitempty"`
+	Version      int       `json:"version"`
+	CheckedAt    time.Time `json:"checkedAt"`
+	Pending      bool      `json:"pending,omitempty"`
+	CoverChecked bool      `json:"coverChecked,omitempty"`
 }
 
 type libraryRowsKey struct{}
@@ -40,7 +41,19 @@ func supportsSortMetadata(drama Drama) bool {
 }
 
 func needsSortMetadata(drama Drama) bool {
-	return supportsSortMetadata(drama) && (drama.SortMetadata == nil || drama.SortMetadata.Version != sortMetadataVersion)
+	return supportsSortMetadata(drama) && (drama.SortMetadata == nil || drama.SortMetadata.Version != dramaSortMetadataVersion(drama) || needsHongguoCoverAddress(drama))
+}
+
+func needsHongguoCoverAddress(drama Drama) bool {
+	return dramaProvider(drama) == sourceHongguo && bestDramaCover(drama) == "" &&
+		(drama.SortMetadata == nil || !drama.SortMetadata.CoverChecked)
+}
+
+func dramaSortMetadataVersion(drama Drama) int {
+	if dramaProvider(drama) == sourceHuangguoAI {
+		return huangguoMetadataVersion
+	}
+	return sortMetadataVersion
 }
 
 func selectSortMetadataBatch(dramas []Drama, source string, priority []string, now time.Time) []Drama {
@@ -57,7 +70,7 @@ func selectSortMetadataBatch(dramas []Drama, source string, priority []string, n
 			continue
 		}
 		seen[drama.ID] = true
-		if drama.SortMetadata != nil && now.Sub(drama.SortMetadata.CheckedAt) < sortMetadataRetryDelay {
+		if drama.SortMetadata != nil && drama.SortMetadata.Version == 0 && now.Sub(drama.SortMetadata.CheckedAt) < sortMetadataRetryDelay {
 			continue
 		}
 		candidates = append(candidates, drama)
@@ -153,7 +166,8 @@ func (d *Downloader) backfillSortMetadata(ctx context.Context, source string) ([
 				stop()
 				patch.SortMetadata = &sortMetadataState{CheckedAt: time.Now()}
 				if err == nil {
-					patch.SortMetadata.Version = sortMetadataVersion
+					patch.SortMetadata.Version = dramaSortMetadataVersion(drama)
+					patch.SortMetadata.CoverChecked = dramaProvider(drama) == sourceHongguo
 				}
 				results <- result{patch: patch, previous: drama, err: err}
 			}
@@ -170,7 +184,7 @@ func (d *Downloader) backfillSortMetadata(ctx context.Context, source string) ([
 				failures[provider] = fmt.Errorf("部分历史资料未补齐，可稍后重试: %w", result.err)
 			}
 		}
-		if patch.OnlineDate != "" && patch.OnlineDate != result.previous.OnlineDate || patch.Heat != "" && patch.Heat != result.previous.Heat || patch.Views != "" && patch.Views != result.previous.Views {
+		if patch.OnlineDate != "" && patch.OnlineDate != result.previous.OnlineDate || patch.Heat != "" && patch.Heat != result.previous.Heat || patch.Views != "" && patch.Views != result.previous.Views || bestDramaCover(patch) != "" && bestDramaCover(patch) != bestDramaCover(result.previous) || huangguoContentChanged(result.previous, mergeDramaMetadata(patch, result.previous)) {
 			progress.Updated++
 		}
 		patches = append(patches, patch)

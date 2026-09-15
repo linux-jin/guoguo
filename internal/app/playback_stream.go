@@ -18,11 +18,13 @@ import (
 )
 
 var playbackDurationPattern = regexp.MustCompile(`Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)`)
+var playbackLevelPattern = regexp.MustCompile(`profile Constrained Baseline, level (\d+)\.(\d+)`)
 
 type playbackLog struct {
 	mu       sync.Mutex
 	text     cappedStringWriter
 	duration float64
+	mime     string
 	ready    chan struct{}
 	once     sync.Once
 }
@@ -31,6 +33,13 @@ func (log *playbackLog) Write(data []byte) (int, error) {
 	log.mu.Lock()
 	defer log.mu.Unlock()
 	_, _ = log.text.Write(data)
+	if log.mime == "" {
+		if match := playbackLevelPattern.FindStringSubmatch(log.text.String()); len(match) == 3 {
+			major, _ := strconv.Atoi(match[1])
+			minor, _ := strconv.Atoi(match[2])
+			log.mime = fmt.Sprintf(`video/mp4; codecs="avc1.42C0%02X, mp4a.40.2"`, major*10+minor)
+		}
+	}
 	if log.duration == 0 {
 		if match := playbackDurationPattern.FindStringSubmatch(log.text.String()); len(match) == 4 {
 			hours, _ := strconv.ParseFloat(match[1], 64)
@@ -39,7 +48,7 @@ func (log *playbackLog) Write(data []byte) (int, error) {
 			log.duration = hours*3600 + minutes*60 + seconds
 		}
 	}
-	if log.duration > 0 || strings.Contains(log.text.String(), "Output #0") {
+	if log.mime != "" || strings.Contains(log.text.String(), "Output #0") {
 		log.once.Do(func() { close(log.ready) })
 	}
 	return len(data), nil
@@ -51,6 +60,12 @@ func (log *playbackLog) snapshot() (float64, string) {
 	return log.duration, log.text.String()
 }
 
+func (log *playbackLog) mimeType() string {
+	log.mu.Lock()
+	defer log.mu.Unlock()
+	return firstNonEmpty(log.mime, playbackMIME)
+}
+
 func (downloader *Downloader) resolvePlaybackMedia(ctx context.Context, task Task) (providerMedia, []byte, error) {
 	if isHuangguoProviderSource(task.Chapter.Source) || task.Chapter.PageURL != "" || isProviderHTTPMediaURL(task.Chapter.VideoURL) || strings.HasPrefix(task.Chapter.VideoURL, "hongguo-cenc://") {
 		media, err := downloader.resolveProviderMedia(ctx, task)
@@ -59,9 +74,13 @@ func (downloader *Downloader) resolvePlaybackMedia(ctx context.Context, task Tas
 	if task.Chapter.VideoURL == "" {
 		return providerMedia{}, nil, errors.New("此分集没有可用的播放地址")
 	}
-	key, err := hex.DecodeString(downloader.cfg.AESKeyHex)
-	if err != nil || len(key) != aes.BlockSize {
-		return providerMedia{}, nil, errors.New("原 API 播放需要有效的 aesKeyHex 配置")
+	var key []byte
+	if downloader.cfg.AESKeyHex != "" {
+		var err error
+		key, err = hex.DecodeString(downloader.cfg.AESKeyHex)
+		if err != nil || len(key) != aes.BlockSize {
+			return providerMedia{}, nil, errors.New("aesKeyHex 必须是 16 字节 AES 密钥的 hex 编码")
+		}
 	}
 	base, err := downloader.apiEndpoint(ctx)
 	if err != nil {
@@ -82,7 +101,7 @@ func (downloader *Downloader) resolvePlaybackMedia(ctx context.Context, task Tas
 	return providerMedia{URL: mediaURL, Playlist: playlist, Duration: m3u8Duration(playlist), Referer: legacyFrontendURL + "/"}, key, nil
 }
 
-func playbackFFmpegArgs(media providerMedia, input string, offset float64) []string {
+func playbackEncodingArgs(media providerMedia, input string, offset float64) []string {
 	threads := "2"
 	if watchOnlyMode() {
 		threads = "1"
@@ -109,32 +128,28 @@ func playbackFFmpegArgs(media providerMedia, input string, offset float64) []str
 			"-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-profile:v", "baseline", "-level:v", "3.1",
 			"-pix_fmt", "yuv420p", "-crf", "28", "-maxrate", "1200k", "-bufsize", "2400k", "-threads", "1",
 			"-g", "48", "-keyint_min", "48", "-sc_threshold", "0",
-			"-c:a", "aac", "-b:a", "96k", "-ar", "44100", "-ac", "2",
-			"-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-frag_duration", "1000000", "-f", "mp4", "pipe:1")
+			"-c:a", "aac", "-b:a", "96k", "-ar", "44100", "-ac", "2")
 	}
 	return append(args,
 		"-i", input, "-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn", "-map_metadata", "-1",
-		"-vf", "fps=30,scale=w='min(iw,if(gte(iw,ih),1280,720))':h='min(ih,if(gte(iw,ih),720,1280))':force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1",
-		"-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-profile:v", "baseline", "-level:v", "3.1",
-		"-pix_fmt", "yuv420p", "-crf", "23", "-maxrate", "3000k", "-bufsize", "6000k", "-threads", "2",
+		"-vf", "fps=30,scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1",
+		"-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-profile:v", "baseline",
+		"-pix_fmt", "yuv420p", "-crf", "23", "-maxrate", "12000k", "-bufsize", "24000k", "-threads", "2",
 		"-g", "30", "-keyint_min", "30", "-sc_threshold", "0",
-		"-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
-		"-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-frag_duration", "1000000", "-f", "mp4", "pipe:1")
+		"-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2")
 }
 
-func (app *UIApp) streamPlayback(ctx context.Context, cancel context.CancelFunc, writer http.ResponseWriter, task Task, downloadID string, offset float64, run uint64, ready func(float64)) (resultErr error) {
-	started := false
-	defer func() {
-		if resultErr != nil && !started {
-			writeJSON(writer, http.StatusBadGateway, map[string]string{"error": app.redactError(resultErr)})
-		}
-	}()
+func playbackFFmpegArgs(media providerMedia, input string, offset float64) []string {
+	return append(playbackEncodingArgs(media, input, offset), "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-frag_duration", "1000000", "-f", "mp4", "pipe:1")
+}
+
+func (app *UIApp) preparePlaybackMedia(ctx context.Context, task Task, downloadID string) (providerMedia, string, *hlsProxy, error) {
 	var input string
 	if downloadID != "" {
 		var err error
 		task, input, err = app.playbackCollectionTask(downloadID)
 		if err != nil {
-			return err
+			return providerMedia{}, "", nil, err
 		}
 	}
 	var media providerMedia
@@ -144,17 +159,37 @@ func (app *UIApp) streamPlayback(ctx context.Context, cancel context.CancelFunc,
 		var err error
 		media, key, err = app.downloader.resolvePlaybackMedia(ctx, task)
 		if err != nil {
-			return fmt.Errorf("播放地址解析失败：%w", err)
+			return providerMedia{}, "", nil, fmt.Errorf("播放地址解析失败：%w", err)
+		}
+		media, err = app.downloader.selectPlaybackQuality(ctx, media)
+		if err != nil {
+			return providerMedia{}, "", nil, fmt.Errorf("清晰度解析失败：%w", err)
 		}
 		if len(media.CENCKey) != 0 && (len(media.CENCKey) != aes.BlockSize || media.Playlist != "") {
-			return errors.New("播放密钥或媒体格式无效")
+			return providerMedia{}, "", nil, errors.New("播放密钥或媒体格式无效")
 		}
 		proxy, err = app.downloader.newHLSProxy(ctx, media, key)
 		if err != nil {
-			return err
+			return providerMedia{}, "", nil, err
 		}
-		defer proxy.Close()
 		input = proxy.root
+	}
+	return media, input, proxy, nil
+}
+
+func (app *UIApp) streamPlayback(ctx context.Context, cancel context.CancelFunc, writer http.ResponseWriter, task Task, downloadID string, offset float64, run uint64, ready func(float64)) (resultErr error) {
+	started := false
+	defer func() {
+		if resultErr != nil && !started {
+			writeJSON(writer, http.StatusBadGateway, map[string]string{"error": app.redactError(resultErr)})
+		}
+	}()
+	media, input, proxy, err := app.preparePlaybackMedia(ctx, task, downloadID)
+	if err != nil {
+		return err
+	}
+	if proxy != nil {
+		defer proxy.Close()
 	}
 	ffmpeg, err := app.downloader.ensureFFmpeg(ctx)
 	if err != nil {
@@ -212,6 +247,8 @@ func (app *UIApp) streamPlayback(ctx context.Context, cancel context.CancelFunc,
 	writer.Header().Set("Content-Disposition", "inline")
 	writer.Header().Set("X-Playback-Duration", strconv.FormatFloat(duration, 'f', 3, 64))
 	writer.Header().Set("X-Playback-Run", strconv.FormatUint(run, 10))
+	writer.Header().Set("X-Playback-MIME", log.mimeType())
+	setPlaybackQualityHeaders(writer.Header(), media)
 	if proxy == nil {
 		writer.Header().Set("X-Playback-Source", "local")
 	} else {

@@ -171,5 +171,5 @@
     options?.onError(node('historyError').textContent);
   }
 
-  window.JukuHistory = {init, get, progressText, remember, save, refresh, reportError};
+  window.JukuHistory = {init, get, list: () => Array.from(entries.values()), progressText, remember, save, refresh, reportError};
 })();

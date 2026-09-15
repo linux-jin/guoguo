@@ -64,6 +64,9 @@ func TestPrimaryCatalogReturnsBeforeOptionalMetadataForAllSources(t *testing.T) 
 			})
 			old := Drama{ID: providerDramaID(source, "7498612570866076734"), Source: source, Title: "历史条目"}
 			fresh := Drama{ID: providerDramaID(source, id), Source: source, Title: "列表标题", Heat: "20019", Views: "0"}
+			if source == sourceHongguo {
+				fresh.Cover = coverAddressFixture
+			}
 			if source == sourceHuangguoAI {
 				fresh.Heat = ""
 			}
@@ -107,7 +110,7 @@ func TestPrimaryCatalogReturnsBeforeOptionalMetadataForAllSources(t *testing.T) 
 				if source == sourceHongguo {
 					wantViews = "0"
 				}
-				if row.ID == fresh.ID && (row.OnlineDate != "2026-03-16" || row.Views != wantViews || row.Heat != fresh.Heat || row.Title != "列表标题" || row.SortMetadata == nil || row.SortMetadata.Version != sortMetadataVersion || row.SortMetadata.Pending) {
+				if row.ID == fresh.ID && (row.OnlineDate != "2026-03-16" || row.Views != wantViews || row.Heat != fresh.Heat || row.Title != "列表标题" || row.SortMetadata == nil || row.SortMetadata.Version != dramaSortMetadataVersion(row) || row.SortMetadata.Pending) {
 					t.Errorf("asynchronous metadata was not merged correctly: %+v", row)
 				}
 			}
@@ -149,14 +152,14 @@ func TestResumeOnlyPreviouslyQueuedMetadata(t *testing.T) {
 }
 
 func TestPrimarySortFieldsNeedNoAdditionalInterfacesWhenComplete(t *testing.T) {
-	hongguo := hongguoDramaFromAny(map[string]any{"series_id": "7615465407347952664", "series_title": "列表剧", "first_visible_time": "1773662280", "hot_score": "20019", "series_play_cnt": "0"}, "测试")
+	hongguo := hongguoDramaFromAny(map[string]any{"series_id": "7615465407347952664", "series_title": "列表剧", "series_cover": coverAddressFixture, "first_visible_time": "1773662280", "hot_score": "20019", "series_play_cnt": "0"}, "测试")
 	huangdouRow := map[string]any{"id": "target", "name": "列表剧", "issue_date": "2026-03-16", "hot_rate": "20019", "click": 0}
 	huangdou := huangdouDramaFromMap(huangdouRow)
 	ranking, err := parseHuangdouRanking(map[string]any{"data": map[string]any{"list": []any{huangdouRow}}}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	huangguo, ok := dramaFromAIMap(map[string]any{"id": "453", "title": "列表剧", "publish_date": "2026-03-16", "play_count": "0", "created_at": "2026-01-01"}, huangguoAIBaseURL, "测试")
+	huangguo, ok := dramaFromAIMap(map[string]any{"id": "453", "title": "列表剧", "episode_count": 12, "publish_date": "2026-03-16", "play_count": "0", "created_at": "2026-01-01"}, huangguoAIBaseURL, "测试")
 	if !ok {
 		t.Fatal("invalid primary list fixture")
 	}

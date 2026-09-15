@@ -26,6 +26,7 @@ type hongguoRankingContent struct {
 		Tags        []string `json:"tags"`
 		Description string   `json:"description"`
 		EpisodeIDs  []string `json:"episodeVids"`
+		Cover       any      `json:"cover"`
 	} `json:"rankList"`
 	Pagination struct {
 		Page       int `json:"pageNum"`
@@ -79,6 +80,9 @@ func parseHongguoRanking(body string, board rankingBoard, page int) (rankingPage
 		}
 		seen[id], previous = true, row.Rank
 		drama := Drama{ID: providerDramaID(sourceHongguo, id), Source: sourceHongguo, SourceID: id, Title: row.Title, Name: row.Title, Desc: row.Description, Intro: row.Description, Tags: row.Tags, Heat: row.Heat, Score: strings.TrimPrefix(row.Score, "评分"), ChannelName: "红果"}
+		if cover := hongguoCoverAddress(coverPathFromAny(row.Cover)); cover != "" {
+			drama.Cover, drama.CoverURL = cover, cover
+		}
 		if len(row.Tags) > 0 {
 			drama.CategoryName = row.Tags[0]
 		}

@@ -96,8 +96,8 @@ func TestLiveHistoricalSortMetadata(t *testing.T) {
 		if row.SortMetadata == nil || row.SortMetadata.Version != sortMetadataVersion {
 			t.Errorf("entry was not checked: %s", row.ID)
 		}
-		if row.Cover != nil || row.CoverURL != nil {
-			t.Fatal("verification must not collect image assets")
+		if address := bestDramaCover(row); address != "" && (row.Source != sourceHongguo || hongguoCoverAddress(address) != address) {
+			t.Fatal("metadata must retain only a validated cover address")
 		}
 		report = append(report, textRow{row.ID, row.Source, row.Title, row.OnlineDate, row.Heat, row.Views})
 	}

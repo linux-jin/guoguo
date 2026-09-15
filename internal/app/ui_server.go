@@ -81,6 +81,8 @@ type UIApp struct {
 	playbackPrefetchSlots chan struct{}
 	historyOnce           sync.Once
 	history               *playbackHistoryStore
+	followingOnce         sync.Once
+	following             *followingStore
 	coverImages           coverImageCache
 }
 type uiState struct {
@@ -221,11 +223,20 @@ func (a *UIApp) ListenAndServe(addr string) error {
 	_ = a.saveStateLocked()
 	a.mu.Unlock()
 
+	defer a.closePlaybacks()
+
+	server := &http.Server{Addr: addr, Handler: a.routes(), ReadHeaderTimeout: 10 * time.Second}
+	return server.ListenAndServe()
+}
+
+func (a *UIApp) routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/", a.handleIndex)
+	mux.Handle("/assets/", webAssets())
 	mux.HandleFunc("/api/ui/dramas", a.handleDramas)
 	mux.HandleFunc("/api/ui/search", a.handleLibrarySearch)
+	mux.HandleFunc("/api/ui/following", a.handleFollowing)
 	mux.HandleFunc("/api/ui/rankings", a.handleRankings)
 	mux.HandleFunc("/api/ui/download", a.handleDownload)
 	mux.HandleFunc("/api/ui/tasks", a.handleTasks)
@@ -242,10 +253,7 @@ func (a *UIApp) ListenAndServe(addr string) error {
 	mux.HandleFunc("/api/ui/directory/pick", a.handleDirectoryPicker)
 	mux.HandleFunc("/api/ui/image", a.handleImage)
 	a.registerPlaybackRoutes(mux)
-	defer a.closePlaybacks()
-
-	server := &http.Server{Addr: addr, Handler: wrapBasicAuth(mux), ReadHeaderTimeout: 10 * time.Second}
-	return server.ListenAndServe()
+	return wrapBasicAuth(mux)
 }
 
 func (a *UIApp) startWorkers() {
@@ -696,11 +704,15 @@ func (a *UIApp) handleDramas(w http.ResponseWriter, r *http.Request) {
 
 func (a *UIApp) normalizeDramaCovers(dramas []Drama) {
 	for i := range dramas {
-		dramas[i].OnlineDate = normalizeDate(dramas[i].OnlineDate)
-		dramas[i].Views = normalizeViews(dramas[i].Views)
-		if p := bestDramaCover(dramas[i]); p != "" {
-			dramas[i].Cover = "/api/ui/image?url=" + url.QueryEscape(p)
-		}
+		normalizeDramaCover(&dramas[i])
+	}
+}
+
+func normalizeDramaCover(drama *Drama) {
+	drama.OnlineDate = normalizeDate(drama.OnlineDate)
+	drama.Views = normalizeViews(drama.Views)
+	if p := bestDramaCover(*drama); p != "" {
+		drama.Cover = "/api/ui/image?url=" + url.QueryEscape(p)
 	}
 }
 
@@ -763,6 +775,10 @@ func (a *UIApp) handleImage(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	buf, err := a.loadCoverImage(ctx, remoteURL, decodeImageBytes)
 	if err != nil {
+		if r.Context().Err() == nil {
+			remote, _ := url.Parse(remoteURL)
+			a.downloader.recordDiagnostic(diagnosticEvent{Event: "cover.failed", Host: remote.Hostname(), Message: a.redactError(err)})
+		}
 		http.Error(w, a.redactError(err), http.StatusBadGateway)
 		return
 	}
@@ -1789,12 +1805,5 @@ func (a *UIApp) redactError(err error) string {
 }
 
 func (a *UIApp) redactString(s string) string {
-	secrets := []string{a.cfg.Token, a.cfg.AESKeyHex, a.cfg.InterfaceKey, a.cfg.ParamKey, a.cfg.ParamIV}
-	for _, secret := range secrets {
-		secret = strings.TrimSpace(secret)
-		if secret != "" {
-			s = strings.ReplaceAll(s, secret, "[redacted]")
-		}
-	}
-	return redactErrorString(s)
+	return redactConfiguredString(&a.cfg, s)
 }

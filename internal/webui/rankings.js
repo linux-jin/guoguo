@@ -81,6 +81,7 @@
           submitting.delete(drama.id);
         }
       });
+      download.classList.add('ranking-download');
       download.disabled = submitted.has(drama.id) || submitting.has(drama.id);
       download.setAttribute('aria-label', '下载 ' + title);
       actions.append(watch, download);
