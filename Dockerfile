@@ -19,5 +19,5 @@ USER 1000:1000
 WORKDIR /data
 VOLUME ["/data", "/downloads"]
 EXPOSE 8998
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD-SHELL curl --noproxy '*' --fail --silent --output /dev/null "http://127.0.0.1:${PORT:-8998}/healthz" || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD curl --noproxy '*' --fail --silent --output /dev/null "http://127.0.0.1:${PORT:-8998}/healthz" || exit 1
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
