@@ -254,6 +254,7 @@ func (a *UIApp) ListenAndServe(addr string) error {
 
 func (a *UIApp) routes() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/", a.handleIndex)
 	mux.Handle("/assets/", webAssets())
 	mux.HandleFunc("/api/ui/viewer", a.handleViewer)
@@ -304,7 +305,7 @@ func (a *UIApp) routes() http.Handler {
 	mux.HandleFunc(tvboxCoverPath, a.handleTVBoxCover)
 	mux.HandleFunc(tvboxPlayPath, a.handleTVBoxPlay)
 	a.registerPlaybackRoutes(mux)
-	return a.withAccountAccess(a.withBrowserViewer(mux))
+	return wrapHostedBasicAuth(a.withAccountAccess(a.withBrowserViewer(mux)))
 }
 
 func (a *UIApp) startWorkers() {

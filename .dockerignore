@@ -6,3 +6,4 @@
 !internal/**
 **/*_test.go
 **/*.test.cjs
+!docker-entrypoint.sh

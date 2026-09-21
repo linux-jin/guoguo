@@ -2,7 +2,7 @@
 
 多站源版，支持黄果、黄豆、红果。支持在线点播、观看记录、追剧清单、下载和 Emby 自动同步 / 导出。编译后的程序无需 Go、Node.js 或 Python；网页资源已经嵌入程序；兼容内容可免 FFmpeg 播放，需要解密、封装、转码或下载时自动准备 FFmpeg。
 
-[启动](#启动与升级) · [账号](#账号与管理员) · [找剧](#剧库与追剧) · [播放](#在线播放) · [下载](#下载与合并) · [Docker](#docker-部署) · [反向代理](#反向代理) · [Emby](#emby-接入) · [TVBox](#tvbox-接口) · [故障排查](#常见问题) · [近期更新](#近期新增功能优化与修复)
+[启动](#启动与升级) · [账号](#账号与管理员) · [找剧](#剧库与追剧) · [播放](#在线播放) · [下载](#下载与合并) · [Docker](#docker-部署) · [Render](#render-部署) · [反向代理](#反向代理) · [Emby](#emby-接入) · [TVBox](#tvbox-接口) · [故障排查](#常见问题) · [近期更新](#近期新增功能优化与修复)
 
 ## 启动与升级
 
@@ -261,6 +261,32 @@ docker compose up -d --build
 也可在 Compose 环境变量 / `.env` 中指定 `JUKU_GO_IMAGE` 和 `JUKU_RUNTIME_IMAGE`，填入自有或已验证可访问仓库中的完整 Go / Debian 镜像名。默认分别为 `golang:1.26-bookworm`、`debian:bookworm-slim`；`scripts/docker-build.sh` 同样支持这两个环境变量。这里只切换基础镜像地址，不改变 Go 依赖代理。
 
 `./scripts/docker-build.sh` 可单独构建，并接受 `--platform linux/arm64` 等 Docker 参数。构建上下文排除运行数据、视频、便携 FFmpeg 和 `dist/`。本次环境没有 Docker 引擎，未在真实容器运行新版；已有本地代理、FFmpeg 和合成媒体回归。
+
+
+## Render 部署
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/linux-jin/guoguo)
+
+仓库根目录的 `render.yaml` 已恢复为最新版 Docker Blueprint，使用新账号系统并保留 TVBox。它会监听 Render 注入的 `$PORT`，健康检查为 `/healthz`，`main` 每次提交后自动部署。
+
+Blueprint 默认生成三组凭据，可在 Render Dashboard → Environment 查看：
+
+| 环境变量 | 用途 |
+| --- | --- |
+| `JUKU_BASIC_AUTH_USER` / `JUKU_BASIC_AUTH_PASS` | 浏览器公网入口的第一层 HTTP Basic Auth；默认用户名为 `juku` |
+| `JUKU_ADMIN_USER` / `JUKU_ADMIN_PASSWORD` | 网页内管理员账号；默认用户名为 `admin` |
+| `JUKU_TVBOX_TOKEN` | TVBox 配置、列表和封面接口令牌 |
+
+TVBox 和签名媒体路径不会被 Basic Auth 二次拦截：TVBox 目录继续校验独立 token，每集播放继续校验 HMAC。配置地址为：
+
+```text
+https://你的域名/api/tvbox/config?token=JUKU_TVBOX_TOKEN的值
+```
+
+免费实例没有持久盘并会休眠；重新部署、休眠回收或实例替换后，账号、缓存、签名密钥和下载内容可能重建，旧 TVBox 分集链接也会失效。免费实例的 CPU / 内存不适合大量转码，能安全直连的 TVBox 内容会通过 302 直接访问源站，其余内容仍消耗 Render 资源和流量。需要稳定保存账号与缓存时，应升级实例并挂载 Persistent Disk 到 `/data`；下载目录需要另行规划持久存储。
+
+已有 Render 服务不会因为仓库重新出现 `render.yaml` 就自动补齐新环境变量。可在 Dashboard 手动添加上述变量，或者重新用 Blueprint 创建服务。重新部署后确认 `/healthz` 返回 `ok`。
+
 
 ## 反向代理
 

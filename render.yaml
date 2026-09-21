@@ -1,0 +1,33 @@
+# Render Blueprint：Docker 部署，自动跟随 main 分支提交。
+# 免费实例没有持久盘且会休眠；重启或重新部署后 /data 与 /downloads 内容会丢失。
+# 浏览器入口使用 HTTP Basic Auth；TVBox 使用独立 token，媒体链接使用分集 HMAC。
+services:
+  - type: web
+    name: juku
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    autoDeployTrigger: commit
+    healthCheckPath: /healthz
+    envVars:
+      - key: TZ
+        value: Asia/Shanghai
+      - key: JUKU_FFMPEG
+        value: /usr/bin/ffmpeg
+      - key: JUKU_CONCURRENCY
+        value: "1"
+      - key: JUKU_ADMIN_USER
+        value: admin
+      - key: JUKU_ADMIN_PASSWORD
+        generateValue: true
+      - key: JUKU_BASIC_AUTH_USER
+        value: juku
+      - key: JUKU_BASIC_AUTH_PASS
+        generateValue: true
+      - key: JUKU_TVBOX_ENABLED
+        value: "1"
+      - key: JUKU_TVBOX_TOKEN
+        generateValue: true
+      - key: JUKU_TVBOX_DIRECT
+        value: "1"

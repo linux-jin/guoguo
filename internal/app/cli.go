@@ -130,6 +130,7 @@ func Run() {
 	flag.Var(&insecureTLS, "insecure-tls", "skip TLS certificate verification")
 	help := flag.Bool("help", false, "show help")
 	flag.Parse()
+	applyHostedListenDefaults(listen, open)
 	if *help {
 		usage()
 		return
@@ -192,6 +193,10 @@ func Run() {
 	}
 
 	if *uiMode {
+		if err := requireHostedAuth(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
 		addr := normalizeListen(*listen)
 		app := NewUIApp(d)
 		pageURL := publicURL(addr)

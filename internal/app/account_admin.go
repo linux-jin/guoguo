@@ -120,6 +120,10 @@ func accountAdminPath(path string) bool {
 func (app *UIApp) withAccountAccess(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		path := request.URL.Path
+		if path == "/healthz" {
+			next.ServeHTTP(writer, request)
+			return
+		}
 		if strings.HasPrefix(path, "/assets/") || strings.HasPrefix(path, "/api/emby/media/") || path == "/api/emby/stream.m3u8" || path == "/api/emby/segment.ts" || path == "/api/emby/cover" || path == tvboxAPIPath || path == tvboxAPIPathNoSlash || path == tvboxConfigPath || path == tvboxCoverPath || path == tvboxPlayPath {
 			next.ServeHTTP(writer, request)
 			return
