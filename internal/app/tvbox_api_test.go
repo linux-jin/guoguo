@@ -82,7 +82,7 @@ func TestTVBoxConfigIncludesTokenizedAPI(t *testing.T) {
 		t.Fatalf("sites=%d", len(response.Sites))
 	}
 	parsed, err := url.Parse(response.Sites[0].API)
-	if err != nil || parsed.Host != "example.test" || parsed.Query().Get("token") != "secret-token" || !strings.HasSuffix(parsed.Path, "/api.php/provide/vod/") {
+	if err != nil || parsed.Host != "example.test" || parsed.RawQuery != "" || parsed.Path != "/api/tvbox/secret-token/vod" {
 		t.Fatalf("unexpected api url=%q err=%v", response.Sites[0].API, err)
 	}
 }
@@ -118,7 +118,7 @@ func TestTVBoxDetailUsesAutomaticPlayGateway(t *testing.T) {
 		t.Fatalf("invalid detail: %v %+v", err, response)
 	}
 	play := response.List[0].VodPlayURL
-	if !strings.Contains(play, "/api/tvbox/play?") || strings.Contains(play, "/api/emby/stream.m3u8") || strings.Contains(play, "catalog-token") {
+	if _, address, ok := strings.Cut(play, "$"); !ok || !strings.Contains(play, "/api/tvbox/play/") || !strings.HasSuffix(address, "/index.m3u8") || strings.Contains(play, "/api/emby/stream.m3u8") || strings.Contains(play, "catalog-token") || strings.Contains(play, "?") {
 		t.Fatalf("detail did not use the signed automatic gateway: %s", play)
 	}
 }
@@ -269,8 +269,73 @@ func TestTVBoxType1SearchAndCategoryWithoutIDs(t *testing.T) {
 		if err := json.Unmarshal(writer.Body.Bytes(), &response); err != nil {
 			t.Fatal(err)
 		}
-		if response.Code != 1 || response.Msg != "数据列表" || response.Total != item.total || len(response.List) != 1 || response.List[0].VodID != item.id || response.List[0].VodPlayURL != "" {
+		if response.Code != 1 || response.Msg != "数据列表" || response.Total != item.total || len(response.List) != 1 || response.List[0].VodID != item.id {
 			t.Fatalf("%s unexpected: %+v", item.raw, response)
 		}
+		if strings.Contains(item.raw, "wd=") {
+			if response.List[0].VodPlayURL != "" {
+				t.Fatalf("%s search without chapter cache should omit play urls: %+v", item.raw, response)
+			}
+			continue
+		}
+		if response.List[0].VodPlayURL != "" {
+			t.Fatalf("%s category list should omit play urls: %+v", item.raw, response)
+		}
+	}
+}
+
+func TestTVBoxMoonTVPathTokenSearchAndVideolist(t *testing.T) {
+	t.Setenv("JUKU_TVBOX_ENABLED", "1")
+	t.Setenv("JUKU_TVBOX_TOKEN", "catalog-token")
+	t.Setenv("JUKU_TVBOX_DIRECT", "0")
+	id := "hongguo:7000000000000000001"
+	chapterID := id + ":8000000000000000001"
+	d := rankingTestDownloader(t, func(request *http.Request) (*http.Response, error) {
+		t.Fatal("cached MoonTV search must not access upstream", request.URL)
+		return nil, nil
+	})
+	d.hongguoClient().details["7000000000000000001"] = hongguoDetailEntry{Drama: Drama{ID: id, Title: "TVBox 详情"}, Chapters: []Chapter{{ID: chapterID, Source: sourceHongguo, Title: "第一集", VideoURL: "hongguo-cenc://8000000000000000001", CurrentEpisode: rawEpisode(1)}}, ExpiresAt: time.Now().Add(time.Minute)}
+	app := &UIApp{cfg: d.cfg, downloader: d, libraryAttempted: true, dramas: []Drama{{ID: id, Source: sourceHongguo, Title: "TVBox 详情"}}}
+
+	search := httptest.NewRecorder()
+	app.routes().ServeHTTP(search, httptest.NewRequest(http.MethodGet, "https://library.test/api/tvbox/catalog-token/vod?ac=videolist&wd=TVBox", nil))
+	if search.Code != http.StatusOK {
+		t.Fatalf("path-token search status=%d body=%s", search.Code, search.Body.String())
+	}
+	var searched tvboxResponse
+	if err := json.Unmarshal(search.Body.Bytes(), &searched); err != nil || searched.Code != 1 || len(searched.List) != 1 {
+		t.Fatalf("path-token search invalid: %v %+v", err, searched)
+	}
+	play := searched.List[0].VodPlayURL
+	_, address, ok := strings.Cut(play, "$")
+	if !ok || searched.List[0].VodID != id || !strings.HasSuffix(address, "/index.m3u8") || !strings.Contains(address, "/api/tvbox/play/") || strings.Contains(address, "?") {
+		t.Fatalf("MoonTV search missing m3u8 play url: %s", play)
+	}
+
+	detail := httptest.NewRecorder()
+	app.routes().ServeHTTP(detail, httptest.NewRequest(http.MethodGet, "https://library.test/api/tvbox/catalog-token/vod?ac=videolist&ids="+url.QueryEscape(id), nil))
+	if detail.Code != http.StatusOK {
+		t.Fatalf("videolist detail status=%d body=%s", detail.Code, detail.Body.String())
+	}
+	var detailed tvboxResponse
+	if err := json.Unmarshal(detail.Body.Bytes(), &detailed); err != nil || len(detailed.List) != 1 || detailed.List[0].VodPlayURL != play {
+		t.Fatalf("videolist detail mismatch: %v %+v", err, detailed)
+	}
+
+	unauthorized := httptest.NewRecorder()
+	app.routes().ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "https://library.test/api/tvbox/wrong-token/vod?ac=videolist&wd=TVBox", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong path token status=%d", unauthorized.Code)
+	}
+
+	key, err := app.embySigningKey(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := tvboxEpisodeGatewayPath(id, chapterID, embyToken(key, id, chapterID))
+	playReq := httptest.NewRecorder()
+	app.routes().ServeHTTP(playReq, httptest.NewRequest(http.MethodGet, "http://localhost"+gateway, nil))
+	if playReq.Code != http.StatusFound || playReq.Header().Get("X-Juku-TVBox-Delivery") != "proxy" || !strings.HasPrefix(playReq.Header().Get("Location"), "/api/emby/stream.m3u8?") {
+		t.Fatalf("path play gateway failed: %d %q %q", playReq.Code, playReq.Header().Get("Location"), playReq.Header().Get("X-Juku-TVBox-Delivery"))
 	}
 }

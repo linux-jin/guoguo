@@ -124,7 +124,7 @@ func (app *UIApp) withAccountAccess(next http.Handler) http.Handler {
 			next.ServeHTTP(writer, request)
 			return
 		}
-		if strings.HasPrefix(path, "/assets/") || strings.HasPrefix(path, "/api/emby/media/") || path == "/api/emby/stream.m3u8" || path == "/api/emby/segment.ts" || path == "/api/emby/cover" || path == tvboxAPIPath || path == tvboxAPIPathNoSlash || path == tvboxConfigPath || path == tvboxCoverPath || path == tvboxPlayPath {
+		if strings.HasPrefix(path, "/assets/") || strings.HasPrefix(path, "/api/emby/media/") || path == "/api/emby/stream.m3u8" || path == "/api/emby/segment.ts" || path == "/api/emby/cover" || isTVBoxPublicPath(path) {
 			next.ServeHTTP(writer, request)
 			return
 		}

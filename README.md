@@ -283,6 +283,12 @@ TVBox 和签名媒体路径不会被 Basic Auth 二次拦截：TVBox 目录继�
 https://你的域名/api/tvbox/config?token=JUKU_TVBOX_TOKEN的值
 ```
 
+MoonTV / MoonTV Plus 不要填 config 地址，也不要在 API 后面再写 `?token=`。请把站源 API 填成路径令牌地址：
+
+```text
+https://你的域名/api/tvbox/JUKU_TVBOX_TOKEN的值/vod
+```
+
 免费实例没有持久盘并会休眠；重新部署、休眠回收或实例替换后，账号、缓存、签名密钥和下载内容可能重建，旧 TVBox 分集链接也会失效。免费实例的 CPU / 内存不适合大量转码，能安全直连的 TVBox 内容会通过 302 直接访问源站，其余内容仍消耗 Render 资源和流量。需要稳定保存账号与缓存时，应升级实例并挂载 Persistent Disk 到 `/data`；下载目录需要另行规划持久存储。
 
 已有 Render 服务不会因为仓库重新出现 `render.yaml` 就自动补齐新环境变量。可在 Dashboard 手动添加上述变量，或者重新用 Blueprint 创建服务。重新部署后确认 `/healthz` 返回 `ok`。
@@ -366,6 +372,8 @@ JUKU_TVBOX_DIRECT=1
 
 ```text
 GET /api/tvbox/config?token=你的令牌
+GET /api/tvbox/你的令牌/vod?ac=videolist&wd=关键词
+GET /api/tvbox/你的令牌/vod?ac=videolist&ids=完整剧集ID
 GET /api.php/provide/vod/?ac=list&token=你的令牌
 GET /api.php/provide/vod/?ac=list&wd=关键词&token=你的令牌
 GET /api.php/provide/vod/?ac=list&t=3&pg=1&token=你的令牌
@@ -375,7 +383,7 @@ GET /api.php/provide/vod/?ac=detail&wd=关键词&token=你的令牌
 GET /api.php/provide/vod/?ac=detail&ids=完整剧集ID&token=你的令牌
 ```
 
-把 `/api/tvbox/config?token=...` 交给支持远程配置的 TVBox，或手动添加 `/api.php/provide/vod/` 作为 JSON 站源。分类可用 MacCMS 标准参数 `t`，也可用 `type` / `typeid` / `type_id`：`1` 黄果、`2` 黄豆、`3` 红果、`4` 黄果 AI、`5` 黄果视频。例如 `.../vod/?token=令牌&type=1` 只取黄果，`type=3` 只取红果；不带分类参数则返回全部站源。TVBox 的 JSON 源搜索会请求 `ac=detail&wd=关键词`（不带 ids），分类翻页会请求 `ac=detail&t=分类`；这两种都按列表处理，只有带 `ids` 的 `ac=detail` 才返回分集播放地址。`vod_id` 使用带站源前缀的完整剧集 ID，不要删掉 `hongguo:`、`huangdou:` 等前缀。
+把 `/api/tvbox/config?token=...` 交给支持远程配置的 TVBox，或手动添加 `/api.php/provide/vod/` 作为 JSON 站源。MoonTV / MoonTV Plus 请把 API 填成 `https://你的域名/api/tvbox/你的令牌/vod`，不要填 config 地址，也不要写成 `...?token=令牌`：MoonTV 会把 `?ac=videolist&wd=` 直接拼到 API 后面，API 里如果已经有问号就会变成非法的双问号。分类可用 MacCMS 标准参数 `t`，也可用 `type` / `typeid` / `type_id`：`1` 黄果、`2` 黄豆、`3` 红果、`4` 黄果 AI、`5` 黄果视频。例如 `.../vod/?token=令牌&type=1` 只取黄果，`type=3` 只取红果；不带分类参数则返回全部站源。TVBox 的 JSON 源搜索会请求 `ac=detail&wd=关键词`（不带 ids），分类翻页会请求 `ac=detail&t=分类`；这两种都按列表处理。MoonTV 搜索走 `ac=videolist&wd=`，详情走 `ac=videolist&ids=`；带关键词的搜索和带 `ids` 的 `videolist` / `detail` 会返回以 `/index.m3u8` 结尾的分集地址，否则 MoonTV 会把结果全部丢掉。`vod_id` 使用带站源前缀的完整剧集 ID，不要删掉 `hongguo:`、`huangdou:` 等前缀。
 
 TVBox 接口必须同时设置独立令牌，不读取网页浏览器 Cookie，也不自动继承网页账号的匿名观看记录；它适合自用客户端。令牌会出现在 TVBox 配置 URL 和封面 URL 中，请不要把配置链接公开分享。每集播放链接使用独立 HMAC 签名，不包含目录令牌。`JUKU_TVBOX_DIRECT` 默认开启：响应头 `X-Juku-TVBox-Delivery: direct` 表示已跳到源站，`proxy` 表示回退本服务。直连成功后视频正文不经过本服务；解析请求仍会经过本服务。要整体撤销已生成的播放链接，可备份后删除 `data/emby-key` 并重启，再重新加载 TVBox 详情。
 自动直连的安全条件比较保守：不携带或转发网页登录 Cookie、Authorization、Referer；拒绝服务端 AES/HLS/CENC 密钥、本地文件、多码率主清单、不可验证的 URL、HTTPS 降级跳转及不支持 Range 的 MP4。探测不通过不会报错，而是透明回退 Render/VPS 中转。因此黄果部分公开 MP4/HLS 有机会省掉服务器视频流量，红果通常仍走服务器解密或封装。源站策略和临时 URL 会变化，同一剧不同集也可能得到不同结果。

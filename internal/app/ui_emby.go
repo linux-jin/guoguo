@@ -86,8 +86,9 @@ func (app *UIApp) authorizeEmby(writer http.ResponseWriter, request *http.Reques
 		return "", "", false
 	}
 	query := request.URL.Query()
-	id, chapter := query.Get("id"), query.Get("chapter")
-	supplied, err := hex.DecodeString(query.Get("key"))
+	id := firstNonEmpty(request.PathValue("id"), query.Get("id"))
+	chapter := firstNonEmpty(request.PathValue("chapter"), query.Get("chapter"))
+	supplied, err := hex.DecodeString(firstNonEmpty(request.PathValue("key"), query.Get("key")))
 	key, keyErr := app.embySigningKey(false)
 	if err != nil || len(supplied) != 32 || keyErr != nil || !validEmbyIdentity(id, chapter) {
 		writeJSON(writer, http.StatusForbidden, map[string]string{"error": "Emby 播放链接无效，请重新导出"})

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,11 +17,60 @@ import (
 // It is intentionally opt-in because it exposes catalog metadata and signed
 // playback URLs to a third-party client.
 const (
-	tvboxAPIPath        = "/api.php/provide/vod/"
-	tvboxAPIPathNoSlash = "/api.php/provide/vod"
-	tvboxConfigPath     = "/api/tvbox/config"
-	tvboxCoverPath      = "/api/tvbox/cover"
+	tvboxAPIPath         = "/api.php/provide/vod/"
+	tvboxAPIPathNoSlash  = "/api.php/provide/vod"
+	tvboxConfigPath      = "/api/tvbox/config"
+	tvboxCoverPath       = "/api/tvbox/cover"
+	tvboxPlayM3U8Path    = "/api/tvbox/play.m3u8"
+	tvboxSearchPlayLimit = 12
 )
+
+func tvboxTokenAPIPath(token string) string {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return tvboxAPIPath
+	}
+	return "/api/tvbox/" + url.PathEscape(token) + "/vod"
+}
+
+func tvboxPathToken(path string) string {
+	path = strings.TrimSuffix(strings.TrimSpace(path), "/")
+	const prefix = "/api/tvbox/"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/vod") {
+		return ""
+	}
+	token := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/vod")
+	if token == "" || strings.Contains(token, "/") {
+		return ""
+	}
+	switch token {
+	case "config", "cover", "play", "play.m3u8":
+		return ""
+	}
+	if decoded, err := url.PathUnescape(token); err == nil {
+		token = decoded
+	}
+	return strings.TrimSpace(token)
+}
+
+func isTVBoxPlayGatewayPath(path string) bool {
+	if path == tvboxPlayPath || path == tvboxPlayM3U8Path {
+		return true
+	}
+	return strings.HasPrefix(path, "/api/tvbox/play/") && strings.HasSuffix(path, "/index.m3u8")
+}
+
+func isTVBoxPublicPath(path string) bool {
+	switch path {
+	case tvboxAPIPath, tvboxAPIPathNoSlash, tvboxConfigPath, tvboxCoverPath:
+		return true
+	}
+	return isTVBoxPlayGatewayPath(path) || tvboxPathToken(path) != ""
+}
+
+func tvboxEpisodeGatewayPath(dramaID, chapterID, key string) string {
+	return "/api/tvbox/play/" + url.PathEscape(dramaID) + "/" + url.PathEscape(chapterID) + "/" + url.PathEscape(key) + "/index.m3u8"
+}
 
 type tvboxResponse struct {
 	Code      int          `json:"code"`
@@ -75,6 +125,12 @@ func tvboxAuthorized(request *http.Request) bool {
 		provided = strings.TrimSpace(request.URL.Query().Get("key"))
 	}
 	if provided == "" {
+		provided = tvboxPathToken(request.URL.Path)
+	}
+	if provided == "" {
+		provided = strings.TrimSpace(request.PathValue("token"))
+	}
+	if provided == "" {
 		auth := strings.TrimSpace(request.Header.Get("Authorization"))
 		if len(auth) >= 7 && strings.EqualFold(auth[:7], "Bearer ") {
 			provided = strings.TrimSpace(auth[7:])
@@ -124,14 +180,7 @@ func (app *UIApp) handleTVBoxConfig(writer http.ResponseWriter, request *http.Re
 	if !app.tvboxGuard(writer, request) {
 		return
 	}
-	apiURL := tvboxAbsoluteURL(request, tvboxAPIPath)
-	if token := tvboxConfiguredToken(); token != "" {
-		parsed, _ := url.Parse(apiURL)
-		query := parsed.Query()
-		query.Set("token", token)
-		parsed.RawQuery = query.Encode()
-		apiURL = parsed.String()
-	}
+	apiURL := tvboxAbsoluteURL(request, tvboxTokenAPIPath(tvboxConfiguredToken()))
 	writeJSON(writer, http.StatusOK, map[string]any{
 		"sites": []map[string]any{{
 			"key":         "juku",
@@ -162,6 +211,11 @@ func tvboxAction(query url.Values) (ac, ids, keyword string, detail bool) {
 	keyword = firstNonEmpty(query.Get("wd"), query.Get("q"), query.Get("keyword"))
 	switch ac {
 	case "", "list", "search", "videolist", "searchlist":
+		// MoonTV Plus details with ac=videolist&ids= (and some clients
+		// use ac=search&ids=) instead of ac=detail&ids=.
+		if ids != "" && (ac == "videolist" || ac == "search") {
+			return "detail", ids, keyword, true
+		}
 		return "list", ids, keyword, false
 	case "detail":
 		// TVBox type=1 JSON sources search with ac=detail&wd= and
@@ -217,6 +271,14 @@ func (app *UIApp) handleTVBoxAPI(writer http.ResponseWriter, request *http.Reque
 	if limit > 100 {
 		limit = 100
 	}
+	attachPlays := keyword != ""
+	if attachPlays && limit > tvboxSearchPlayLimit {
+		limit = tvboxSearchPlayLimit
+	}
+	var playKey []byte
+	if attachPlays {
+		playKey, _ = app.embySigningKey(true)
+	}
 	start := len(filtered)
 	pageCount := 0
 	if len(filtered) > 0 {
@@ -231,7 +293,11 @@ func (app *UIApp) handleTVBoxAPI(writer http.ResponseWriter, request *http.Reque
 	}
 	list := make([]tvboxVod, 0, end-start)
 	for _, drama := range filtered[start:end] {
-		list = append(list, app.tvboxVodFromDrama(request, drama))
+		vod := app.tvboxVodFromDrama(request, drama)
+		if attachPlays {
+			app.tvboxFillPlayURL(request, ctx, &vod, drama, playKey)
+		}
+		list = append(list, vod)
 	}
 	writeJSON(writer, http.StatusOK, tvboxResponse{Code: 1, Msg: "数据列表", Page: page, PageCount: pageCount, Limit: strconv.Itoa(limit), Total: len(filtered), List: list, Class: tvboxClasses()})
 }
@@ -368,30 +434,37 @@ func (app *UIApp) writeTVBoxDetails(writer http.ResponseWriter, request *http.Re
 	list := make([]tvboxVod, 0, len(dramas))
 	for _, drama := range dramas {
 		vod := app.tvboxVodFromDrama(request, drama)
-		title, chapters, chapterErr := app.tvboxChapters(ctx, drama)
-		if chapterErr != nil {
-			vod.VodContent = strings.TrimSpace(firstNonEmpty(vod.VodContent, ""))
-			list = append(list, vod)
-			continue
-		}
-		vod.VodName = firstNonEmpty(title, vod.VodName)
-		vod.VodPlayFrom = "短剧库"
-		plays := make([]string, 0, len(chapters))
-		for index, chapter := range chapters {
-			if !validEmbyIdentity(drama.ID, chapter.ID) {
-				continue
-			}
-			label := firstNonEmpty(chapter.Title, "第 "+chapter.EpisodeString(index+1)+" 集")
-			query := url.Values{"id": {drama.ID}, "chapter": {chapter.ID}, "key": {embyToken(key, drama.ID, chapter.ID)}}
-			plays = append(plays, label+"$"+tvboxAbsoluteURL(request, tvboxPlayPath+"?"+query.Encode()))
-		}
-		vod.VodPlayURL = strings.Join(plays, "#")
+		app.tvboxFillPlayURL(request, ctx, &vod, drama, key)
 		list = append(list, vod)
 	}
 	writeJSON(writer, http.StatusOK, tvboxResponse{Code: 1, Msg: "数据列表", Page: 1, PageCount: 1, Limit: strconv.Itoa(len(list)), Total: len(list), List: list})
 }
 
+func (app *UIApp) tvboxFillPlayURL(request *http.Request, ctx context.Context, vod *tvboxVod, drama Drama, key []byte) {
+	if vod == nil || len(key) == 0 {
+		return
+	}
+	title, chapters, err := app.tvboxChapters(ctx, drama)
+	if err != nil || len(chapters) == 0 {
+		return
+	}
+	vod.VodName = firstNonEmpty(title, vod.VodName)
+	vod.VodPlayFrom = "短剧库"
+	plays := make([]string, 0, len(chapters))
+	for index, chapter := range chapters {
+		if !validEmbyIdentity(drama.ID, chapter.ID) {
+			continue
+		}
+		label := firstNonEmpty(chapter.Title, "第 "+chapter.EpisodeString(index+1)+" 集")
+		plays = append(plays, label+"$"+tvboxAbsoluteURL(request, tvboxEpisodeGatewayPath(drama.ID, chapter.ID, embyToken(key, drama.ID, chapter.ID))))
+	}
+	vod.VodPlayURL = strings.Join(plays, "#")
+}
+
 func (app *UIApp) tvboxChapters(ctx context.Context, drama Drama) (string, []Chapter, error) {
+	if app == nil || app.downloader == nil {
+		return "", nil, errors.New("剧集详情暂不可用")
+	}
 	if isHuangguoProviderSource(drama.Source) {
 		sourceID := strings.TrimSpace(drama.SourceID)
 		if sourceID == "" {

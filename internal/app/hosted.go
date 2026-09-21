@@ -41,7 +41,7 @@ func hostedSecretEqual(left, right string) bool {
 }
 
 func hostedAuthExempt(path string) bool {
-	if path == "/healthz" || path == tvboxAPIPath || path == tvboxAPIPathNoSlash || path == tvboxConfigPath || path == tvboxCoverPath || path == tvboxPlayPath {
+	if path == "/healthz" || isTVBoxPublicPath(path) {
 		return true
 	}
 	if strings.HasPrefix(path, "/api/emby/media/") {

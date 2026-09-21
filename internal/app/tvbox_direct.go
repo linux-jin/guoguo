@@ -66,7 +66,7 @@ func tvboxRedirect(writer http.ResponseWriter, location, delivery string) {
 }
 
 func tvboxPlaybackFallback(request *http.Request, id, chapter string) string {
-	query := url.Values{"id": {id}, "chapter": {chapter}, "key": {request.URL.Query().Get("key")}, "tvbox_proxy": {"1"}}
+	query := url.Values{"id": {id}, "chapter": {chapter}, "key": {firstNonEmpty(request.PathValue("key"), request.URL.Query().Get("key"))}, "tvbox_proxy": {"1"}}
 	if account := request.URL.Query().Get("account"); account != "" {
 		query.Set("account", account)
 	}

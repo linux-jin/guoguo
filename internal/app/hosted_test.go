@@ -29,7 +29,7 @@ func TestHostedBasicAuthAndExemptSignedRoutes(t *testing.T) {
 		t.Fatalf("authenticated status=%d body=%q", authenticated.Code, body)
 	}
 
-	for _, path := range []string{"/healthz", tvboxAPIPath, tvboxConfigPath, tvboxPlayPath, "/api/emby/stream.m3u8", "/api/emby/media/session/file.mp4"} {
+	for _, path := range []string{"/healthz", tvboxAPIPath, tvboxConfigPath, tvboxPlayPath, tvboxPlayM3U8Path, "/api/tvbox/secret-token/vod", "/api/tvbox/play/hongguo:1/hongguo:1:1/abc/index.m3u8", "/api/emby/stream.m3u8", "/api/emby/media/session/file.mp4"} {
 		result := httptest.NewRecorder()
 		handler.ServeHTTP(result, httptest.NewRequest(http.MethodGet, path, nil))
 		if result.Code != http.StatusOK {
