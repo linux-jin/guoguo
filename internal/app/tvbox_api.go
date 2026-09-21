@@ -146,9 +146,38 @@ func (app *UIApp) handleTVBoxConfig(writer http.ResponseWriter, request *http.Re
 	})
 }
 
+func tvboxQuery(request *http.Request) url.Values {
+	if request.Method == http.MethodPost || request.Method == http.MethodPut {
+		_ = request.ParseForm()
+		if len(request.Form) > 0 {
+			return request.Form
+		}
+	}
+	return request.URL.Query()
+}
+
+func tvboxAction(query url.Values) (ac, ids, keyword string, detail bool) {
+	ac = strings.ToLower(strings.TrimSpace(query.Get("ac")))
+	ids = strings.TrimSpace(query.Get("ids"))
+	keyword = firstNonEmpty(query.Get("wd"), query.Get("q"), query.Get("keyword"))
+	switch ac {
+	case "", "list", "search", "videolist", "searchlist":
+		return "list", ids, keyword, false
+	case "detail":
+		// TVBox type=1 JSON sources search with ac=detail&wd= and
+		// browse a category with ac=detail&t=&pg= without ids.
+		if ids == "" {
+			return "list", ids, keyword, false
+		}
+		return "detail", ids, keyword, true
+	default:
+		return ac, ids, keyword, false
+	}
+}
+
 func (app *UIApp) handleTVBoxAPI(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodGet && request.Method != http.MethodHead {
-		writer.Header().Set("Allow", "GET, HEAD")
+	if request.Method != http.MethodGet && request.Method != http.MethodHead && request.Method != http.MethodPost {
+		writer.Header().Set("Allow", "GET, HEAD, POST")
 		writeJSON(writer, http.StatusMethodNotAllowed, map[string]any{"code": 0, "msg": "method not allowed"})
 		return
 	}
@@ -159,28 +188,20 @@ func (app *UIApp) handleTVBoxAPI(writer http.ResponseWriter, request *http.Reque
 		writer.WriteHeader(http.StatusOK)
 		return
 	}
-	query := request.URL.Query()
-	ac := strings.ToLower(strings.TrimSpace(query.Get("ac")))
-	if ac == "" {
-		ac = "list"
-	}
+	query := tvboxQuery(request)
+	ac, ids, keyword, detail := tvboxAction(query)
 	if ac != "list" && ac != "detail" {
-		writeJSON(writer, http.StatusBadRequest, tvboxResponse{Code: 0, Msg: "仅支持 ac=list 或 ac=detail"})
+		writeJSON(writer, http.StatusBadRequest, tvboxResponse{Code: 0, Msg: "仅支持 ac=list、ac=detail、ac=search 或 ac=videolist"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 90*time.Second)
 	defer cancel()
 	dramas := app.tvboxDramas(ctx)
-	filtered := tvboxFilterDramas(dramas, firstNonEmpty(query.Get("wd"), query.Get("q"), query.Get("keyword")), tvboxTypeQuery(query))
-	if ids := strings.TrimSpace(query.Get("ids")); ids != "" {
+	filtered := tvboxFilterDramas(dramas, keyword, tvboxTypeQuery(query))
+	if ids != "" {
 		filtered = tvboxFilterIDs(filtered, ids)
 	}
-	if ac == "detail" {
-		ids := strings.TrimSpace(query.Get("ids"))
-		if ids == "" {
-			writeJSON(writer, http.StatusBadRequest, tvboxResponse{Code: 0, Msg: "ac=detail 需要 ids"})
-			return
-		}
+	if detail {
 		if len(ids) > 8192 || len(strings.Split(ids, ",")) > 20 {
 			writeJSON(writer, http.StatusBadRequest, tvboxResponse{Code: 0, Msg: "一次最多查询 20 部剧"})
 			return

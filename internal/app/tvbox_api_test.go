@@ -243,3 +243,34 @@ func TestTVBoxListTypeAliasFiltersCategory(t *testing.T) {
 		t.Fatalf("type=2 unexpected: err=%v %+v", err, response)
 	}
 }
+
+func TestTVBoxType1SearchAndCategoryWithoutIDs(t *testing.T) {
+	t.Setenv("JUKU_TVBOX_ENABLED", "1")
+	t.Setenv("JUKU_TVBOX_TOKEN", "secret-token")
+	app := tvboxFixtureApp(t)
+	cases := []struct {
+		raw   string
+		total int
+		id    string
+	}{
+		{"/api.php/provide/vod/?ac=detail&wd=%E7%BA%A2%E6%9E%9C&token=secret-token", 1, "hongguo:100"},
+		{"/api.php/provide/vod/?ac=search&wd=%E7%BA%A2%E6%9E%9C&token=secret-token", 1, "hongguo:100"},
+		{"/api.php/provide/vod/?ac=videolist&wd=%E7%BA%A2%E6%9E%9C&token=secret-token", 1, "hongguo:100"},
+		{"/api.php/provide/vod/?ac=detail&t=2&pg=1&token=secret-token", 1, "huangdou:200"},
+		{"/api.php/provide/vod/?ac=detail&type=3&token=secret-token", 1, "hongguo:100"},
+	}
+	for _, item := range cases {
+		writer := httptest.NewRecorder()
+		app.routes().ServeHTTP(writer, httptest.NewRequest(http.MethodGet, item.raw, nil))
+		if writer.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", item.raw, writer.Code, writer.Body.String())
+		}
+		var response tvboxResponse
+		if err := json.Unmarshal(writer.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Code != 1 || response.Msg != "数据列表" || response.Total != item.total || len(response.List) != 1 || response.List[0].VodID != item.id || response.List[0].VodPlayURL != "" {
+			t.Fatalf("%s unexpected: %+v", item.raw, response)
+		}
+	}
+}
