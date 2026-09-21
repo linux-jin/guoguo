@@ -81,13 +81,13 @@ func parseHongguoAppDetail(result map[string]any, seriesID string) (hongguoDetai
 		videoID := mapString(video, "vid")
 		index, err := strconv.Atoi(mapString(video, "vid_index"))
 		if err != nil || index < 1 || !hongguoNumericID.MatchString(videoID) {
-			return hongguoDetailEntry{}, errors.New("红果 App 分集编号或视频 ID 无效")
+			return entry, errors.New("红果 App 分集编号或视频 ID 无效")
 		}
 		if identifier := mapString(video, "series_id"); identifier != "" && identifier != seriesID {
-			return hongguoDetailEntry{}, errors.New("红果 App 返回了其他剧集的分集")
+			return entry, errors.New("红果 App 返回了其他剧集的分集")
 		}
 		if seen[videoID] || episodes[index] {
-			return hongguoDetailEntry{}, errors.New("红果 App 返回了重复分集")
+			return entry, errors.New("红果 App 返回了重复分集")
 		}
 		seen[videoID], episodes[index] = true, true
 		entry.Chapters = append(entry.Chapters, Chapter{
@@ -102,11 +102,11 @@ func parseHongguoAppDetail(result map[string]any, seriesID string) (hongguoDetai
 	})
 	total, _ := strconv.Atoi(mapString(detail, "episode_cnt"))
 	if len(entry.Chapters) == 0 || total > len(entry.Chapters) {
-		return hongguoDetailEntry{}, errors.New("红果 App 未返回完整分集，已尝试其他详情入口")
+		return entry, errors.New("红果 App 未返回完整分集，已尝试其他详情入口")
 	}
 	for index, chapter := range entry.Chapters {
 		if chapter.EpisodeString(index+1) != strconv.Itoa(index+1) {
-			return hongguoDetailEntry{}, errors.New("红果 App 分集列表不连续")
+			return entry, errors.New("红果 App 分集列表不连续")
 		}
 	}
 	return entry, nil

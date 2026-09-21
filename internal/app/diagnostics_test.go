@@ -114,7 +114,7 @@ func TestDiagnosticWriteFailureDoesNotReplacePlaybackError(t *testing.T) {
 func TestPlaybackFailureLogIncludesEpisodeAndSkipsStoppedRun(t *testing.T) {
 	app, session := prefetchFixtureApp(t)
 	session.tasks[0] = Task{DramaID: "hongguo:7000000000000000001", DramaTitle: "合成播放条目", Index: 1}
-	run, _, err := app.beginPlayback(context.Background(), "fixture", 1, 49, 0, 1, false)
+	run, _, err := app.beginPlayback(viewerFixtureContext(app, context.Background()), "fixture", 1, 49, 0, 1, false)
 	if err != nil {
 		t.Fatal(err)
 	}

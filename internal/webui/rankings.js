@@ -2,7 +2,7 @@
   'use strict';
   window.JukuRankings = {init};
 
-  function init({api, post, getSource, sourceLabel, onLibraryChanged, onDownloadsChanged, play}) {
+  function init({api, post, getSource, getDrama = () => null, sourceLabel, onLibraryChanged, onDownloadsChanged, getDownloadQuality = () => 0, canDownload = () => true, play}) {
     const $ = id => document.getElementById(id);
     const dialog = $('rankingPanel');
     const list = $('rankingList');
@@ -40,13 +40,28 @@
       list.replaceChildren(node('li', 'ranking-state', text));
     }
     function setError(text) { $('rankingError').textContent = text || ''; }
+    function renderEntries() {
+      const visible = entries.filter(item => window.JukuVIP.visible(dramaFor(item)));
+      list.replaceChildren(...visible.map(renderEntry));
+      if (!visible.length) state(entries.length ? '本页 VIP 内容已隐藏，可将 VIP 开关切换为“显示”或继续加载。' : '此榜单暂时没有条目');
+    }
+    window.addEventListener('jukuvipfilterchange', event => {if (dialog.open) {renderEntries(); updateSummary(false); if (event.detail?.interactive) event.detail.priority = entries.map(item => item.drama.id);}});
     function updateSummary(stale) {
-      $('rankingSummary').textContent = (updatedText || board?.description || '按站点名次展示') + (entries.length ? ' · 已加载 ' + entries.length + ' 部' : '');
+      $('rankingSummary').textContent = (updatedText || board?.description || '按站点名次展示') + (entries.length ? ' · 显示 ' + entries.filter(item => window.JukuVIP.visible(dramaFor(item))).length + ' / ' + entries.length + ' 部' : '') + (board?.source === 'huangdou' ? ' · ' + window.JukuVIP.summary(entries.map(dramaFor)) : '');
       $('rankingFetchedAt').textContent = fetchedAt ? (stale ? '上次获取：' : '获取于 ') + new Date(fetchedAt).toLocaleString() : '';
     }
 
+    function dramaFor(item) {
+      const known = getDrama(item.drama.id) || {};
+      if ((Date.parse(known.sortMetadata?.checkedAt) || 0) > (Date.parse(fetchedAt) || 0)) return {...item.drama, ...known};
+      const drama = {...known, ...item.drama};
+      for (const [key, value] of Object.entries(known)) {if (drama[key] == null || drama[key] === '') drama[key] = value;}
+      return drama;
+    }
+    window.addEventListener('jukulibrarychange', () => {if (dialog.open) {renderEntries(); updateSummary(false);}});
+
     function renderEntry(item) {
-      const drama = item.drama, title = drama.title || drama.name || '短剧';
+      const drama = dramaFor(item), title = drama.title || drama.name || '短剧';
       const row = node('li', 'ranking-row');
       row.value = item.rank;
       const rank = node('span', 'ranking-number' + (item.rank <= 3 ? ' top' : ''), String(item.rank).padStart(2, '0'));
@@ -56,19 +71,19 @@
       heading.title = title;
       content.appendChild(heading);
       const count = drama.totalEpisode || drama.episodeCount;
-      const details = [item.metric, drama.remark || (count ? count + ' 集' : ''), drama.categoryName].filter(Boolean);
+      const details = [window.JukuVIP.isVIP(drama) ? 'VIP · 仅试看' : '', item.metric, drama.remark || (count ? count + ' 集' : ''), drama.categoryName].filter(Boolean);
       if (details.length) content.appendChild(node('div', 'ranking-meta', details.join(' · ')));
       const actions = node('div', 'ranking-actions');
       const watchLabel = window.JukuHistory?.get(drama.id) ? '继续观看' : '播放';
       const watch = action(watchLabel, () => { dialog.close(); play(drama.id, title); });
       watch.setAttribute('aria-label', watchLabel + ' ' + title);
       const download = action(submitted.has(drama.id) ? '已提交' : '下载', async () => {
-        if (submitting.has(drama.id) || submitted.has(drama.id)) return;
+        if (!canDownload() || submitting.has(drama.id) || submitted.has(drama.id)) return;
         submitting.add(drama.id);
         download.disabled = true;
         download.textContent = '提交中';
         try {
-          await post('/api/ui/download', {ids: [drama.id]});
+          await post('/api/ui/download', {ids: [drama.id], quality: getDownloadQuality()});
           submitted.add(drama.id);
           download.textContent = '已提交';
           $('rankingActionStatus').textContent = '已将《' + title + '》加入下载队列';
@@ -81,10 +96,10 @@
           submitting.delete(drama.id);
         }
       });
-      download.classList.add('ranking-download');
       download.disabled = submitted.has(drama.id) || submitting.has(drama.id);
       download.setAttribute('aria-label', '下载 ' + title);
-      actions.append(watch, download);
+      actions.appendChild(watch);
+      if (canDownload()) actions.appendChild(download);
       row.append(rank, content, actions);
       return row;
     }
@@ -121,8 +136,8 @@
           fetchedAt = result.fetchedAt || '';
           updatedText = result.updatedText || '';
         }
-        for (const item of incoming) list.appendChild(renderEntry(item));
         entries.push(...incoming);
+        renderEntries();
         page = nextPage;
         hasMore = Boolean(result.hasMore) && incoming.length > 0 && !result.stale;
         changed = changed || incoming.length > 0;
@@ -141,6 +156,7 @@
     function selectBoard(id) {
       board = boards.find(item => item.id === id);
       if (!board) return;
+      $('rankingVipFilterBtn').hidden = board.source !== 'huangdou';
       lastBoards.set(board.source, board.id);
       entries = []; page = 0; hasMore = false; fetchedAt = ''; updatedText = '';
       for (const tab of tabs.children) {

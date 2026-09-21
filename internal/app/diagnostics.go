@@ -16,20 +16,28 @@ const diagnosticLogBytes = 5 * 1024 * 1024
 const diagnosticLogBackups = 2
 
 type diagnosticEvent struct {
-	Time         time.Time `json:"time"`
-	Level        string    `json:"level"`
-	Event        string    `json:"event"`
-	Source       string    `json:"source,omitempty"`
-	DramaID      string    `json:"dramaId,omitempty"`
-	DramaTitle   string    `json:"dramaTitle,omitempty"`
-	Episode      int       `json:"episode,omitempty"`
-	Run          uint64    `json:"run,omitempty"`
-	StartSeconds float64   `json:"startSeconds,omitempty"`
-	Host         string    `json:"host,omitempty"`
-	OffsetBytes  int64     `json:"offsetBytes,omitempty"`
-	TotalBytes   int64     `json:"totalBytes,omitempty"`
-	Attempt      int       `json:"attempt,omitempty"`
-	Message      string    `json:"message"`
+	HTTPStatus         int       `json:"httpStatus,omitempty"`
+	Client             string    `json:"client,omitempty"`
+	Protocol           string    `json:"protocol,omitempty"`
+	CFRay              string    `json:"cfRay,omitempty"`
+	ResponseType       string    `json:"responseType,omitempty"`
+	RequestedQuality   int       `json:"requestedQuality,omitempty"`
+	Time               time.Time `json:"time"`
+	Level              string    `json:"level"`
+	Event              string    `json:"event"`
+	Source             string    `json:"source,omitempty"`
+	DramaID            string    `json:"dramaId,omitempty"`
+	DramaTitle         string    `json:"dramaTitle,omitempty"`
+	Episode            int       `json:"episode,omitempty"`
+	Run                uint64    `json:"run,omitempty"`
+	StartSeconds       float64   `json:"startSeconds,omitempty"`
+	Host               string    `json:"host,omitempty"`
+	OffsetBytes        int64     `json:"offsetBytes,omitempty"`
+	TotalBytes         int64     `json:"totalBytes,omitempty"`
+	Attempt            int       `json:"attempt,omitempty"`
+	Quality            int       `json:"quality,omitempty"`
+	AvailableQualities []int     `json:"availableQualities,omitempty"`
+	Message            string    `json:"message"`
 }
 
 type diagnosticLog struct {

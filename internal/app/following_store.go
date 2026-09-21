@@ -126,7 +126,7 @@ func (store *followingStore) update(id string, change func(followingEntry, bool)
 }
 
 func (store *followingStore) write(data followingFile) error {
-	if err := os.MkdirAll(filepath.Dir(store.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(store.path), 0o700); err != nil {
 		return err
 	}
 	file, err := os.CreateTemp(filepath.Dir(store.path), ".following-*.json")
@@ -144,9 +144,4 @@ func (store *followingStore) write(data followingFile) error {
 		return err
 	}
 	return os.Rename(file.Name(), store.path)
-}
-
-func (app *UIApp) followingStore() *followingStore {
-	app.followingOnce.Do(func() { app.following = newFollowingStore(app.cfg.dataDirectory()) })
-	return app.following
 }

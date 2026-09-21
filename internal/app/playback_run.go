@@ -23,7 +23,7 @@ type playbackRunContext struct {
 func (app *UIApp) beginPlayback(parent context.Context, id string, index int, offset float64, quality int, version uint64, native bool) (*playbackRunContext, int, error) {
 	app.playbackMu.Lock()
 	session := app.playbacks[id]
-	if session == nil {
+	if !viewerOwnsPlayback(parent, session) {
 		app.playbackMu.Unlock()
 		return nil, http.StatusGone, errors.New("播放会话已过期，请重新打开本剧")
 	}
@@ -45,8 +45,13 @@ func (app *UIApp) beginPlayback(parent context.Context, id string, index int, of
 	}
 	previousCancel := session.cancel
 	cache := session.prefetch
-	session.prefetch, session.native = nil, nil
-	if cache != nil && (offset != 0 || cache.episode != index || cache.fromRun != session.run || cache.quality != quality || (cache.native != nil) != native) {
+	session.prefetch, session.native, session.media = nil, nil, nil
+	remux, _ := parent.Value(playbackRemuxKey{}).(bool)
+	if cache != nil && (offset != 0 && !cache.planOnly || cache.episode != index || cache.fromRun != session.run || cache.quality != quality || (cache.native != nil) != native || !native && cache.remux != remux) {
+		cache.cancel()
+		cache = nil
+	}
+	if cache != nil && !cache.promote() {
 		cache.cancel()
 		cache = nil
 	}

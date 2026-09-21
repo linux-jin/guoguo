@@ -1,3 +1,5 @@
+import { viewerHeaders, checkViewerResponse } from './viewer.js';
+
 export const $ = id => document.getElementById(id);
 let messageTimer;
 
@@ -20,7 +22,7 @@ function setMessage(text, isError = false, action = null) {
   messageTimer = setTimeout(() => target.replaceChildren(), action ? 10000 : 6500);
 }
 
-async function api(path, options){ const init=options||{}; init.headers=Object.assign({'Accept':'application/json'},init.headers||{}); if(init.body)init.headers['Content-Type']='application/json'; const response=await fetch(path,init); let data; try{data=await response.json();}catch(_){throw new Error('服务器未返回有效 JSON，请确认已启动新版程序');} if(!response.ok)throw new Error(data.error||'HTTP '+response.status); return data; }
+async function api(path, options){ const init=options||{}; init.headers=Object.assign({'Accept':'application/json'},viewerHeaders(),init.headers||{}); if(init.body)init.headers['Content-Type']='application/json'; const response=await fetch(path,init); let data; try{data=await response.json();}catch(_){throw new Error('服务器未返回有效 JSON，请确认已启动新版程序');} checkViewerResponse(data); if(!response.ok){const error=new Error(data.error||'HTTP '+response.status);error.status=response.status;throw error;} return data; }
 
 function post(path, body){ return api(path,{method:'POST',body:JSON.stringify(body)}); }
 
@@ -81,6 +83,7 @@ function groupStats(group){const stats={success:0,failed:0,running:0,parsing:0,q
 export { element, empty, button, setMessage, api, post, valueText, firstNonEmpty, dramaTitle, watchLabel, historySuffix, normalizeSource, sourceKey, sourceLabel, categoryName, episodeCount, coverURL, tagsText, dramaSearchText, rebuildOptions, number, formatBytes, formatTime, statusText, releaseText, phaseText, progressText, progressBar, episodeLabel, groupStats };
 
 const iconShapes = {
+  user: [['circle', {cx: 12, cy: 8, r: 4}], ['path', {d: 'M4 21v-2a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v2'}]],
   brand: [['rect', {x: 3.5, y: 3.5, width: 17, height: 17, rx: 3}], ['path', {d: 'm10 8 6 4-6 4Z', fill: 'currentColor', stroke: 'none'}]],
   library: [['rect', {x: 3, y: 3, width: 7, height: 7, rx: 1.5}], ['rect', {x: 14, y: 3, width: 7, height: 7, rx: 1.5}], ['rect', {x: 3, y: 14, width: 7, height: 7, rx: 1.5}], ['rect', {x: 14, y: 14, width: 7, height: 7, rx: 1.5}]],
   bookmark: [['path', {d: 'M6 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v16l-6-4-6 4Z'}]],
@@ -100,6 +103,8 @@ const iconShapes = {
   folder: [['path', {d: 'M3 8V5a2 2 0 0 1 2-2h5l3 3h6a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8h18'}]],
   previous: [['path', {d: 'M6 5v14m12-14L8 12l10 7Z'}]],
   next: [['path', {d: 'M18 5v14M6 5l10 7-10 7Z'}]],
+  pause: [['path', {d: 'M8 5v14M16 5v14', 'stroke-width': 4}]],
+  rotate: [['rect', {x: 7, y: 6, width: 10, height: 12, rx: 2, transform: 'rotate(-25 12 12)'}], ['path', {d: 'M3 10V5h5m13 9v5h-5M3 5a11 11 0 0 1 17 2M21 19A11 11 0 0 1 4 17'}]],
   fullscreen: [['path', {d: 'M9 3H3v6m12-6h6v6M3 15v6h6m12-6v6h-6'}]],
   clock: [['circle', {cx: 12, cy: 12, r: 9}], ['path', {d: 'M12 7v5l3 2'}]],
   activity: [['path', {d: 'M3 12h4l3-8 4 16 3-8h4'}]],
@@ -107,7 +112,10 @@ const iconShapes = {
   check: [['path', {d: 'm5 12 4 4L19 6'}]]
 };
 
+const iconTemplates = new Map();
+
 export function icon(name) {
+  if (iconTemplates.has(name)) return iconTemplates.get(name).cloneNode(true);
   const namespace = 'http://www.w3.org/2000/svg';
   const svg = document.createElementNS(namespace, 'svg');
   svg.setAttribute('viewBox', '0 0 24 24');
@@ -118,7 +126,8 @@ export function icon(name) {
     for (const [key, value] of Object.entries(attributes)) shape.setAttribute(key, value);
     svg.appendChild(shape);
   }
-  return svg;
+  iconTemplates.set(name, svg);
+  return svg.cloneNode(true);
 }
 
 export function populateIcons(root = document) {
@@ -131,6 +140,16 @@ export function readPreference(key, fallback) {
 
 export function savePreference(key, value) {
   try {localStorage.setItem('duanju.' + key, JSON.stringify(value));} catch (_) {}
+}
+
+export function reconcileChildren(root, nodes) {
+  const keep = new Set(nodes);
+  for (const child of Array.from(root.childNodes)) if (!keep.has(child)) child.remove();
+  let cursor = root.firstChild;
+  for (const node of nodes) {
+    if (cursor === node) cursor = cursor.nextSibling;
+    else root.insertBefore(node, cursor);
+  }
 }
 
 export function withFocus(root, render) {

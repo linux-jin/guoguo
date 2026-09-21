@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,21 +15,26 @@ const playbackPrefetchChunks = 512
 type playbackPrefetchKey struct{}
 
 type playbackPrefetch struct {
-	episode int
-	fromRun uint64
-	quality int
-	native  *playbackNative
-	ctx     context.Context
-	cancel  context.CancelFunc
-	chunks  chan []byte
-	ready   chan struct{}
-	done    chan struct{}
-	once    sync.Once
-	headers http.Header
-	status  int
-	mu      sync.Mutex
-	header  http.Header
-	err     error
+	episode    int
+	fromRun    uint64
+	quality    int
+	remux      bool
+	planOnly   bool
+	resolved   *playbackMediaSession
+	native     *playbackNative
+	ctx        context.Context
+	cancel     context.CancelFunc
+	chunks     chan []byte
+	ready      chan struct{}
+	done       chan struct{}
+	once       sync.Once
+	headers    http.Header
+	status     int
+	mu         sync.Mutex
+	header     http.Header
+	err        error
+	foreground atomic.Bool
+	preempted  bool
 }
 
 type playbackPrefetchView struct {
@@ -38,10 +44,12 @@ type playbackPrefetchView struct {
 
 func newPlaybackPrefetch(episode int, run uint64) *playbackPrefetch {
 	ctx := context.WithValue(context.Background(), backgroundCatalogKey{}, true)
-	ctx = context.WithValue(ctx, playbackPrefetchKey{}, true)
-	ctx, cancel := context.WithCancel(ctx)
-	return &playbackPrefetch{episode: episode, fromRun: run, ctx: ctx, cancel: cancel,
+	cache := &playbackPrefetch{episode: episode, fromRun: run,
 		chunks: make(chan []byte, playbackPrefetchChunks), ready: make(chan struct{}), done: make(chan struct{}), headers: make(http.Header)}
+	ctx = context.WithValue(ctx, playbackPrefetchKey{}, cache)
+	ctx, cancel := context.WithCancel(ctx)
+	cache.ctx, cache.cancel = ctx, cancel
+	return cache
 }
 
 func (cache *playbackPrefetch) Header() http.Header              { return cache.headers }
@@ -90,6 +98,12 @@ func (cache *playbackPrefetch) finish(err error) {
 }
 
 func (cache *playbackPrefetch) view() *playbackPrefetchView {
+	cache.mu.Lock()
+	resolved := cache.resolved != nil && cache.err == nil
+	cache.mu.Unlock()
+	if resolved {
+		return &playbackPrefetchView{Episode: cache.episode, State: "resolved"}
+	}
 	if cache.native != nil {
 		state, _ := cache.native.state()
 		switch state {
@@ -147,7 +161,7 @@ func (cache *playbackPrefetch) serve(ctx context.Context, writer http.ResponseWr
 	case <-ctx.Done():
 		return true, ctx.Err()
 	}
-	for _, name := range []string{"Content-Type", "Content-Disposition", "X-Playback-Duration", "X-Playback-Source", "X-Playback-MIME", "X-Playback-Quality", "X-Playback-Qualities"} {
+	for _, name := range []string{"Content-Type", "Content-Disposition", "X-Playback-Duration", "X-Playback-Source", "X-Playback-MIME", "X-Playback-Mode", "X-Playback-Quality", "X-Playback-Qualities"} {
 		if value := header.Get(name); value != "" {
 			writer.Header().Set(name, value)
 		}
@@ -189,23 +203,20 @@ func (cache *playbackPrefetch) serve(ctx context.Context, writer http.ResponseWr
 }
 
 func (app *UIApp) handlePlaybackPrefetch(writer http.ResponseWriter, request *http.Request) {
-	if watchOnlyMode() {
-		writeJSON(writer, http.StatusOK, map[string]any{"disabled": true})
-		return
-	}
 	var input struct {
 		Session string `json:"session"`
 		Episode int    `json:"episode"`
 		Run     uint64 `json:"run"`
 		Version uint64 `json:"version"`
 		Cancel  bool   `json:"cancel"`
+		Remux   bool   `json:"remux"`
 	}
 	if !readPlaybackRequest(writer, request, &input) {
 		return
 	}
 	app.playbackMu.Lock()
 	session := app.playbacks[input.Session]
-	if session == nil {
+	if !viewerOwnsPlayback(request.Context(), session) {
 		app.playbackMu.Unlock()
 		writeJSON(writer, http.StatusGone, map[string]string{"error": "播放会话已过期"})
 		return
@@ -224,7 +235,7 @@ func (app *UIApp) handlePlaybackPrefetch(writer http.ResponseWriter, request *ht
 	if session.native != nil {
 		state, _ = session.native.state()
 	}
-	if !input.Cancel && state != "ended" {
+	if !input.Cancel && state != "ended" && session.media == nil {
 		app.playbackMu.Unlock()
 		writeJSON(writer, http.StatusConflict, map[string]string{"error": "当前集尚未缓冲完成"})
 		return
@@ -241,15 +252,18 @@ func (app *UIApp) handlePlaybackPrefetch(writer http.ResponseWriter, request *ht
 		writeJSON(writer, http.StatusOK, map[string]bool{"ok": true})
 		return
 	}
-	if previous != nil && previous.episode == input.Episode && previous.fromRun == input.Run {
+	remux := input.Remux && session.native == nil
+	if previous != nil && previous.episode == input.Episode && previous.fromRun == input.Run && previous.remux == remux {
 		view := previous.view()
 		app.playbackMu.Unlock()
 		writeJSON(writer, http.StatusOK, view)
 		return
 	}
 	cache := newPlaybackPrefetch(input.Episode, input.Run)
-	cache.quality = session.quality
+	cache.quality, cache.remux = session.quality, remux
+	cache.planOnly = session.media != nil
 	cache.ctx = context.WithValue(cache.ctx, playbackQualityKey{}, cache.quality)
+	cache.ctx = context.WithValue(cache.ctx, playbackRemuxKey{}, remux)
 	session.prefetch = cache
 	task := session.tasks[input.Episode-1]
 	downloadID := ""
@@ -261,24 +275,32 @@ func (app *UIApp) handlePlaybackPrefetch(writer http.ResponseWriter, request *ht
 		cancel := cache.cancel
 		cache.cancel = func() { cancel(); cache.native.Close() }
 	}
-	if app.playbackPrefetchSlots == nil {
-		app.playbackPrefetchSlots = make(chan struct{}, 1)
-	}
-	slots := app.playbackPrefetchSlots
 	app.playbackMu.Unlock()
 	if previous != nil {
 		previous.cancel()
 	}
 	go func() {
-		select {
-		case slots <- struct{}{}:
-			defer func() { <-slots }()
-		case <-cache.ctx.Done():
-			cache.finish(cache.ctx.Err())
+		release, err := app.mediaResources().acquire(cache.ctx, "prefetch", true)
+		if err != nil {
+			cache.cancel()
+			cache.finish(err)
 			return
 		}
+		defer release()
 		startup := time.AfterFunc(60*time.Second, cache.cancel)
 		defer startup.Stop()
+		if cache.planOnly {
+			defer cache.cancel()
+			resolved, err := app.resolveMediaSession(cache.ctx, cache.ctx, task, downloadID, cache.quality)
+			if err == nil {
+				cache.mu.Lock()
+				cache.resolved = resolved
+				cache.mu.Unlock()
+				resolved.Close()
+			}
+			cache.finish(err)
+			return
+		}
 		if cache.native != nil {
 			cache.native.start()
 			_, err := cache.native.segment(cache.ctx, 0)
@@ -298,7 +320,7 @@ func (app *UIApp) handlePlaybackPrefetch(writer http.ResponseWriter, request *ht
 			return
 		}
 		defer cache.cancel()
-		err := app.streamPlayback(cache.ctx, cache.cancel, cache, task, downloadID, 0, 0, func(float64) { startup.Stop() })
+		err = app.streamPlayback(cache.ctx, cache.cancel, cache, task, downloadID, 0, 0, func(float64) { startup.Stop() })
 		cache.finish(err)
 	}()
 	writeJSON(writer, http.StatusAccepted, &playbackPrefetchView{Episode: input.Episode, State: "preparing"})

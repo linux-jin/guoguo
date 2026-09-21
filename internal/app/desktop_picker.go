@@ -166,9 +166,6 @@ func localDirectoryPickerRequest(request *http.Request) bool {
 }
 
 func (a *UIApp) handleDirectoryPicker(writer http.ResponseWriter, request *http.Request) {
-	if rejectWatchOnly(writer) {
-		return
-	}
 	writer.Header().Set("Cache-Control", "no-store")
 	if request.Method != http.MethodPost {
 		writer.Header().Set("Allow", http.MethodPost)

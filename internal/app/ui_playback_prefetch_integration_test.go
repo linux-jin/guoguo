@@ -50,13 +50,13 @@ func TestPlaybackPrefetchLocalFFmpeg(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "http://localhost/api/ui/playback/prepare", bytes.NewBufferString(`{"session":"fixture","episode":2}`))
 	request.Header.Set("Content-Type", "application/json")
 	writer := httptest.NewRecorder()
-	app.handlePlaybackPrepare(writer, request)
+	app.handlePlaybackPrepare(writer, viewerFixtureRequest(app, request))
 	if writer.Code != 200 {
 		t.Fatal("collection preparation failed", writer.Body.String())
 	}
 	writer = httptest.NewRecorder()
 	started := time.Now()
-	app.handlePlaybackStream(writer, httptest.NewRequest(http.MethodGet, "http://localhost/api/ui/playback/stream?session=fixture&episode=2", nil))
+	app.handlePlaybackStream(writer, viewerFixtureRequest(app, httptest.NewRequest(http.MethodGet, "http://localhost/api/ui/playback/stream?session=fixture&episode=2", nil)))
 	if writer.Code != 200 || writer.Header().Get("X-Playback-Prefetched") != "1" || writer.Header().Get("X-Playback-Source") != "local" ||
 		!bytes.Contains(writer.Body.Bytes(), []byte("ftyp")) || !bytes.Contains(writer.Body.Bytes(), []byte("moof")) {
 		t.Fatal("cached playback did not return the generated fragmented MP4")

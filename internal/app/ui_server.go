@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -38,6 +39,7 @@ type UIApp struct {
 	selected             map[string]bool
 	tasks                map[string]*UITask
 	taskOrder            []string
+	dramaDirectories     map[string]string
 	merges               map[string]*UIMergeState
 	lastError            string
 	loadedAt             time.Time
@@ -67,6 +69,8 @@ type UIApp struct {
 	address               string
 	runningCancels        map[string]context.CancelFunc
 	mergeMu               sync.Mutex
+	mergeJobs             map[string]*uiMergeJob
+	mergeStopped          bool
 	parsingInFlight       map[string]bool
 	parsingCancels        map[string]context.CancelFunc
 	closed                bool
@@ -79,22 +83,32 @@ type UIApp struct {
 	playbackMu            sync.Mutex
 	playbacks             map[string]*playbackSession
 	playbackPrefetchSlots chan struct{}
-	historyOnce           sync.Once
-	history               *playbackHistoryStore
-	followingOnce         sync.Once
-	following             *followingStore
+	playbackResourcesOnce sync.Once
+	playbackResources     *playbackResources
+	viewersOnce           sync.Once
+	viewers               *viewerManager
+	embyMu                sync.Mutex
+	embyKey               []byte
+	embySyncOnce          sync.Once
+	embySync              *embySyncManager
+	dramaRefreshes        map[string]*dramaRefreshCall
+	dramaRefreshSlots     chan struct{}
 	coverImages           coverImageCache
+	coverRepairs          map[string]*coverRepairCall
+	coverRepairSlots      chan struct{}
 }
 type uiState struct {
-	Dramas      []Drama                  `json:"dramas,omitempty"`
-	LoadedAt    time.Time                `json:"loadedAt,omitempty"`
-	LastError   string                   `json:"lastError,omitempty"`
-	TaskOrder   []string                 `json:"taskOrder"`
-	Tasks       []*UITask                `json:"tasks"`
-	MergeStates map[string]*UIMergeState `json:"merges,omitempty"`
+	Dramas           []Drama                  `json:"dramas,omitempty"`
+	LoadedAt         time.Time                `json:"loadedAt,omitempty"`
+	LastError        string                   `json:"lastError,omitempty"`
+	TaskOrder        []string                 `json:"taskOrder"`
+	Tasks            []*UITask                `json:"tasks"`
+	MergeStates      map[string]*UIMergeState `json:"merges,omitempty"`
+	DramaDirectories map[string]string        `json:"dramaDirectories,omitempty"`
 }
 
 type UIMergeState struct {
+	PlaybackTaskID string    `json:"playbackTaskId,omitempty"`
 	DramaID        string    `json:"dramaId"`
 	DramaTitle     string    `json:"dramaTitle,omitempty"`
 	Status         string    `json:"status"`
@@ -152,6 +166,7 @@ type UITask struct {
 }
 
 type uiTaskView struct {
+	DownloadQuality     int       `json:"downloadQuality"`
 	ID                  string    `json:"id"`
 	DramaID             string    `json:"dramaId"`
 	DramaTitle          string    `json:"dramaTitle"`
@@ -204,18 +219,25 @@ func NewUIApp(d *Downloader) *UIApp {
 	a.cond = sync.NewCond(&a.mu)
 	a.loadState()
 	a.loadLibrary()
-	a.playbackHistory()
 	a.startWorkers()
 	return a
 }
 
 func (a *UIApp) ListenAndServe(addr string) error {
+	if err := a.prepareBrowserViewers(); err != nil {
+		return err
+	}
 	defer a.stopSortMetadata()
+	a.embySyncer().start()
+	defer a.embySyncer().stop()
 	installer := a.downloader.ffmpegInstallation()
 	defer installer.stop()
 	go func() {
-		if _, err := installer.ensure(context.Background()); err != nil {
+		path, err := installer.ensure(context.Background())
+		if err != nil {
 			fmt.Printf("FFmpeg 准备失败：%v\n", publicError(err))
+		} else {
+			fmt.Printf("FFmpeg 已就绪：%s\n", path)
 		}
 	}()
 	a.mu.Lock()
@@ -224,6 +246,7 @@ func (a *UIApp) ListenAndServe(addr string) error {
 	a.mu.Unlock()
 
 	defer a.closePlaybacks()
+	defer a.stopMergeJobs()
 
 	server := &http.Server{Addr: addr, Handler: a.routes(), ReadHeaderTimeout: 10 * time.Second}
 	return server.ListenAndServe()
@@ -231,13 +254,28 @@ func (a *UIApp) ListenAndServe(addr string) error {
 
 func (a *UIApp) routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", handleHealthz)
 	mux.HandleFunc("/", a.handleIndex)
 	mux.Handle("/assets/", webAssets())
+	mux.HandleFunc("/api/ui/viewer", a.handleViewer)
+	mux.HandleFunc("/api/ui/viewer/legacy", a.handleViewerLegacy)
+	mux.HandleFunc("/api/ui/account/register", a.handleAccountRegister)
+	mux.HandleFunc("/api/ui/account/login", a.handleAccountLogin)
+	mux.HandleFunc("/api/ui/account/logout", a.handleAccountLogout)
+	mux.HandleFunc("/api/ui/account/password", a.handleAccountPassword)
+	mux.HandleFunc("/api/ui/account/import", a.handleAccountImport)
+	mux.HandleFunc("/api/ui/admin/settings", a.handleAdminSettings)
+	mux.HandleFunc("/api/ui/admin/accounts", a.handleAdminAccounts)
+	mux.HandleFunc("/api/ui/admin/accounts/sources", a.handleAdminAccountPermissions)
+	mux.HandleFunc("/api/ui/admin/accounts/permissions", a.handleAdminAccountPermissions)
 	mux.HandleFunc("/api/ui/dramas", a.handleDramas)
+	mux.HandleFunc("/api/ui/cover/repair", a.handleCoverRepair)
+	mux.HandleFunc("/api/ui/dramas/refresh", a.handleDramaRefresh)
+	mux.HandleFunc("/api/ui/vip/metadata", a.handleVIPMetadata)
 	mux.HandleFunc("/api/ui/search", a.handleLibrarySearch)
+	mux.HandleFunc("/api/ui/search/suggestions", a.handleLibrarySearchSuggestions)
 	mux.HandleFunc("/api/ui/following", a.handleFollowing)
 	mux.HandleFunc("/api/ui/rankings", a.handleRankings)
+	mux.HandleFunc("/api/ui/recommendations", a.handleRecommendations)
 	mux.HandleFunc("/api/ui/download", a.handleDownload)
 	mux.HandleFunc("/api/ui/tasks", a.handleTasks)
 	mux.HandleFunc("/api/ui/update", a.handleUpdate)
@@ -247,13 +285,26 @@ func (a *UIApp) routes() http.Handler {
 	mux.HandleFunc("/api/ui/tasks/resume", a.handleResume)
 	mux.HandleFunc("/api/ui/tasks/clear", a.handleClear)
 	mux.HandleFunc("/api/ui/merge", a.handleMerge)
+	mux.HandleFunc("/api/ui/merge/cancel", a.handleMergeCancel)
 	mux.HandleFunc("/api/ui/ffmpeg", a.handleFFmpeg)
 	mux.HandleFunc("/api/ui/config", a.handleConfig)
 	mux.HandleFunc("/api/ui/network/check", a.handleNetworkCheck)
 	mux.HandleFunc("/api/ui/directory/pick", a.handleDirectoryPicker)
 	mux.HandleFunc("/api/ui/image", a.handleImage)
+	mux.HandleFunc("/api/ui/admin/emby", a.handleEmbySyncSettings)
+	mux.HandleFunc("/api/ui/admin/emby/sync", a.handleEmbySyncNow)
+	mux.HandleFunc("/api/emby/export", a.handleEmbyExport)
+	mux.HandleFunc("/api/emby/cover", a.handleEmbyCover)
+	mux.HandleFunc("/api/emby/stream.m3u8", a.handleEmbyStream)
+	mux.HandleFunc("/api/emby/merged.mp4", a.handleEmbyMerged)
+	mux.HandleFunc("/api/emby/segment.ts", a.handleEmbySegment)
+	mux.HandleFunc(tvboxAPIPath, a.handleTVBoxAPI)
+	mux.HandleFunc(tvboxAPIPathNoSlash, a.handleTVBoxAPI)
+	mux.HandleFunc(tvboxConfigPath, a.handleTVBoxConfig)
+	mux.HandleFunc(tvboxCoverPath, a.handleTVBoxCover)
+	mux.HandleFunc(tvboxPlayPath, a.handleTVBoxPlay)
 	a.registerPlaybackRoutes(mux)
-	return wrapBasicAuth(mux)
+	return a.withAccountAccess(a.withBrowserViewer(mux))
 }
 
 func (a *UIApp) startWorkers() {
@@ -382,6 +433,9 @@ func (a *UIApp) worker() {
 		}
 		a.mu.Unlock()
 		a.cond.Broadcast()
+		if err == nil {
+			a.notifyEmbySync()
+		}
 	}
 }
 
@@ -485,11 +539,18 @@ func (a *UIApp) loadState() {
 	a.normalizeDramaCovers(a.dramas)
 	a.loadedAt = state.LoadedAt
 	a.lastError = a.redactString(state.LastError)
+	a.dramaDirectories = state.DramaDirectories
 	if state.MergeStates != nil {
 		a.merges = state.MergeStates
 	}
 	seen := map[string]bool{}
 	changed := false
+	for _, state := range a.merges {
+		if state != nil && (state.Status == "running" || state.Status == "queued") {
+			state.Status, state.Detail, state.Error = "failed", "", "服务已重启，合并已中断；原分集已保留，可重新合并"
+			changed = true
+		}
+	}
 	for _, task := range state.Tasks {
 		if task == nil || task.RemoveRequested {
 			changed = true
@@ -572,6 +633,13 @@ func (a *UIApp) loadState() {
 		if task.ID != "" && !seen[task.ID] {
 			seen[task.ID] = true
 			a.tasks[task.ID] = task
+			if !isChapterPlaceholderTask(task) && task.Path != "" && a.dramaDirectories[task.DramaID] == "" {
+				if a.dramaDirectories == nil {
+					a.dramaDirectories = make(map[string]string)
+				}
+				a.dramaDirectories[task.DramaID] = filepath.Dir(task.Path)
+				changed = true
+			}
 		}
 	}
 	for _, id := range state.TaskOrder {
@@ -600,11 +668,12 @@ func (a *UIApp) saveStateLocked() error {
 		return err
 	}
 	state := uiState{
-		LoadedAt:    a.loadedAt,
-		LastError:   a.lastError,
-		TaskOrder:   append([]string(nil), a.taskOrder...),
-		Tasks:       make([]*UITask, 0, len(a.tasks)),
-		MergeStates: cloneMergeStates(a.merges),
+		LoadedAt:         a.loadedAt,
+		LastError:        a.lastError,
+		TaskOrder:        append([]string(nil), a.taskOrder...),
+		Tasks:            make([]*UITask, 0, len(a.tasks)),
+		MergeStates:      cloneMergeStates(a.merges),
+		DramaDirectories: a.dramaDirectories,
 	}
 	if !a.librarySaved {
 		state.Dramas = append([]Drama(nil), a.dramas...)
@@ -642,7 +711,7 @@ func (a *UIApp) saveStateLocked() error {
 }
 
 func (a *UIApp) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
+	if r.URL.Path != "/" && r.URL.Path != "/login" {
 		http.NotFound(w, r)
 		return
 	}
@@ -668,8 +737,13 @@ func (a *UIApp) handleDramas(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	source := r.URL.Query().Get("source")
-	if source != "" && source != "huangguo" && source != "huangdou" && source != "hongguo" {
+	switch source {
+	case "", "huangguo", "cloudfront", sourceHuangguoAI, sourceHuangguoVideo, sourceHuangdou, sourceHongguo:
+	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "不支持刷新该站源"})
+		return
+	}
+	if source != "" && !requireSource(w, r.Context(), source) {
 		return
 	}
 	var priority []string
@@ -686,7 +760,11 @@ func (a *UIApp) handleDramas(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if !a.requireDramaSources(w, r, priority) {
+		return
+	}
 	a.mu.Lock()
+	updateAccepted := update && a.libraryLoading == nil
 	if a.libraryLoading == nil && (update || refresh || more || len(a.dramas) == 0 && !a.libraryAttempted) {
 		mode := libraryLoadRefresh
 		if update {
@@ -694,10 +772,13 @@ func (a *UIApp) handleDramas(w http.ResponseWriter, r *http.Request) {
 		} else if more {
 			mode = libraryLoadMore
 		}
-		a.startLibraryLoadLocked(source, mode, priority)
+		a.startLibraryLoadLocked(source, mode, priority, r.Context())
 	}
 	revision, _ := strconv.ParseUint(r.URL.Query().Get("revision"), 10, 64)
-	resp := a.librarySnapshotLocked(revision)
+	resp := a.librarySnapshotForSourceLocked(r.Context(), revision)
+	if update {
+		resp["updateAccepted"] = updateAccepted
+	}
 	a.mu.Unlock()
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -771,7 +852,12 @@ func (a *UIApp) handleImage(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid image url", http.StatusBadRequest)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	source, allowed := a.imageSource(r.Context(), remoteURL)
+	if !allowed {
+		writeSourceDenied(w)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithValue(r.Context(), coverSourceKey{}, source), 90*time.Second)
 	defer cancel()
 	buf, err := a.loadCoverImage(ctx, remoteURL, decodeImageBytes)
 	if err != nil {
@@ -784,7 +870,10 @@ func (a *UIApp) handleImage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", imageContentType(buf))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	if sourceScopeRestricted(r.Context()) {
+		w.Header().Set("Cache-Control", "private, no-store")
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(buf)
 }
@@ -810,20 +899,38 @@ func buildImageURL(imgPath string) (string, bool) {
 	return "https://zzzznnn.lkkwip.cn/" + imgPath, true
 }
 
-func allowedImageHost(host string) bool {
+func isHuangguoImageCDNHost(host string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
-	switch host {
-	case "zzzznnn.lkkwip.cn", "pic.zdmhyg.cn", "huangguoai.com", "www.huangguoai.com", "huangguo.video", "cdn.huangguo.video", "tideember.cc", "xqjurgek.top", "d3rorc0p4i1kyz.cloudfront.net":
-		return true
-	default:
-		return strings.HasSuffix(host, ".zdmhyg.cn") || isHongguoImageHost(host)
+	return host == "pic.tuafjz.cn" || strings.HasSuffix(host, ".zdmhyg.cn")
+}
+
+func sourceCoverReferer(source, remoteURL string) string {
+	switch source {
+	case sourceHongguo:
+		return hongguoBaseURL + "/"
+	case sourceHuangguoAI:
+		return "https://huangguoai.com/"
+	case sourceHuangguoVideo:
+		return "https://huangguo.video/"
+	case sourceHuangdou:
+		if remote, err := url.Parse(remoteURL); err == nil {
+			host := strings.ToLower(remote.Hostname())
+			if host == "tideember.cc" || host == "xqjurgek.top" {
+				return remote.Scheme + "://" + remote.Host + "/home"
+			}
+		}
+		return huangdouBaseURL + "/home"
 	}
+	return imageReferer(remoteURL)
 }
 
 func imageReferer(remoteURL string) string {
 	if u, err := url.Parse(remoteURL); err == nil {
-		switch u.Hostname() {
-		case "pic.zdmhyg.cn", "huangguoai.com", "www.huangguoai.com":
+		if isHuangguoImageCDNHost(u.Hostname()) {
+			return "https://huangguoai.com/"
+		}
+		switch strings.ToLower(u.Hostname()) {
+		case "huangguoai.com", "www.huangguoai.com":
 			return "https://huangguoai.com/"
 		case "huangguo.video", "cdn.huangguo.video":
 			return "https://huangguo.video/"
@@ -843,10 +950,8 @@ func decodeImageBytes(buf []byte, remoteURL string) []byte {
 	if isKnownImage(buf) {
 		return buf
 	}
-	if u, err := url.Parse(remoteURL); err == nil && (u.Hostname() == "pic.zdmhyg.cn" || strings.HasSuffix(u.Hostname(), ".zdmhyg.cn")) {
-		if decoded := decryptHuangguoImage(buf); isKnownImage(decoded) {
-			return decoded
-		}
+	if decoded := decryptHuangguoImage(buf); isKnownImage(decoded) || isHEICImage(decoded) {
+		return trimHuangguoImagePadding(decoded)
 	}
 	copyBuf := append([]byte(nil), buf...)
 	decryptImageHeader(copyBuf)
@@ -857,31 +962,42 @@ func decodeImageBytes(buf []byte, remoteURL string) []byte {
 }
 
 func decryptHuangguoImage(buf []byte) []byte {
-	if len(buf) == 0 || len(buf)%aes.BlockSize != 0 {
+	if bytes.HasPrefix(buf, []byte("Salted__")) {
+		if len(buf) <= 16 {
+			return nil
+		}
+		buf = buf[16:]
+	}
+	if len(buf) == 0 || len(buf) > maxCoverBytes {
 		return nil
 	}
 	block, err := aes.NewCipher([]byte("f5d965df75336270"))
 	if err != nil {
 		return nil
 	}
-	out := make([]byte, len(buf))
-	cipher.NewCBCDecrypter(block, []byte("97b60394abc2fbe1")).CryptBlocks(out, buf)
-	if len(out) > 0 {
-		pad := int(out[len(out)-1])
-		if pad > 0 && pad <= aes.BlockSize && pad <= len(out) {
+	out := make([]byte, (len(buf)+aes.BlockSize-1)/aes.BlockSize*aes.BlockSize)
+	copy(out, buf)
+	cipher.NewCBCDecrypter(block, []byte("97b60394abc2fbe1")).CryptBlocks(out, out)
+	return out[:len(buf)]
+}
+
+func trimHuangguoImagePadding(buf []byte) []byte {
+	if len(buf) > 0 {
+		pad := int(buf[len(buf)-1])
+		if pad > 0 && pad <= aes.BlockSize && pad <= len(buf) {
 			valid := true
-			for _, b := range out[len(out)-pad:] {
+			for _, b := range buf[len(buf)-pad:] {
 				if int(b) != pad {
 					valid = false
 					break
 				}
 			}
 			if valid {
-				out = out[:len(out)-pad]
+				buf = buf[:len(buf)-pad]
 			}
 		}
 	}
-	return out
+	return buf
 }
 
 func decryptImageHeader(buf []byte) {
@@ -916,38 +1032,38 @@ func isKnownImage(buf []byte) bool {
 }
 
 func (a *UIApp) handleDownload(w http.ResponseWriter, r *http.Request) {
-	if rejectWatchOnly(w) {
-		return
-	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	ids, ok := readIDsRequest(w, r)
+	ids, quality, ok := readDownloadRequest(w, r)
 	if !ok {
 		return
 	}
-	views := a.enqueueDramasAsync(ids, false)
+	if !a.requireDramaSources(w, r, ids) {
+		return
+	}
+	views := a.enqueueDramasAsync(ids, false, quality)
 	writeJSON(w, http.StatusAccepted, map[string]any{"data": views, "pending": true})
 }
 
 func (a *UIApp) handleUpdate(w http.ResponseWriter, r *http.Request) {
-	if rejectWatchOnly(w) {
-		return
-	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	ids, ok := readIDsRequest(w, r)
+	ids, quality, ok := readDownloadRequest(w, r)
 	if !ok {
 		return
 	}
-	views := a.enqueueDramasAsync(ids, true)
+	if !a.requireDramaSources(w, r, ids) {
+		return
+	}
+	views := a.enqueueDramasAsync(ids, true, quality)
 	writeJSON(w, http.StatusAccepted, map[string]any{"data": views, "pending": true})
 }
 
-func (a *UIApp) enqueueDramasAsync(ids []string, updateOnly bool) []uiTaskView {
+func (a *UIApp) enqueueDramasAsync(ids []string, updateOnly bool, requestedQuality *int) []uiTaskView {
 	a.mu.Lock()
 	if a.parsingInFlight == nil {
 		a.parsingInFlight = map[string]bool{}
@@ -972,9 +1088,21 @@ func (a *UIApp) enqueueDramasAsync(ids []string, updateOnly bool) []uiTaskView {
 			}
 			continue
 		}
+		quality := 0
+		if updateOnly {
+			for _, taskID := range a.taskOrder {
+				if task := a.tasks[taskID]; task != nil && task.DramaID == drama.ID {
+					quality = task.Source.DownloadQuality
+					break
+				}
+			}
+		}
+		if requestedQuality != nil {
+			quality = *requestedQuality
+		}
 		dramas = append(dramas, drama)
 		a.parsingInFlight[dramaKey] = true
-		if view, changed := a.addParsingPlaceholderTaskLocked(drama); view.ID != "" {
+		if view, changed := a.addParsingPlaceholderTaskLocked(drama, quality); view.ID != "" {
 			views = append(views, view)
 			if changed {
 				a.cond.Broadcast()
@@ -1017,19 +1145,13 @@ func (a *UIApp) markParsingFinished(dramas []Drama) {
 	}
 }
 
-func (a *UIApp) enqueueDramas(ctx context.Context, dramas []Drama, updateOnly bool) ([]uiTaskView, []uiTaskView, string) {
+func (a *UIApp) enqueueDramas(ctx context.Context, dramas []Drama, updateOnly bool, quality int) ([]uiTaskView, []uiTaskView, string) {
 	views := []uiTaskView{}
 	failedViews := []uiTaskView{}
 	respErr := ""
 	for _, drama := range dramas {
 		a.mu.Lock()
-		existingDirectory := ""
-		for _, id := range a.taskOrder {
-			if task := a.tasks[id]; task != nil && task.DramaID == drama.ID && !isChapterPlaceholderTask(task) && task.Path != "" {
-				existingDirectory = filepath.Dir(task.Path)
-				break
-			}
-		}
+		existingDirectory := a.dramaDirectoryLocked(drama.ID)
 		a.mu.Unlock()
 		built, err := a.downloader.buildDramaTasksInDirectory(ctx, drama, existingDirectory)
 		if err != nil {
@@ -1045,7 +1167,7 @@ func (a *UIApp) enqueueDramas(ctx context.Context, dramas []Drama, updateOnly bo
 			}
 			a.lastError = respErr
 			a.removeParsingPlaceholderTaskLocked(drama)
-			if view, changed := a.addFailedPlaceholderTaskLocked(drama, err); view.ID != "" {
+			if view, changed := a.addFailedPlaceholderTaskLocked(drama, err, quality); view.ID != "" {
 				failedViews = append(failedViews, view)
 				if changed {
 					a.cond.Broadcast()
@@ -1068,7 +1190,7 @@ func (a *UIApp) enqueueDramas(ctx context.Context, dramas []Drama, updateOnly bo
 			}
 			a.lastError = respErr
 			a.removeParsingPlaceholderTaskLocked(drama)
-			if view, changed := a.addFailedPlaceholderTaskLocked(drama, errors.New("没有可下载章节")); view.ID != "" {
+			if view, changed := a.addFailedPlaceholderTaskLocked(drama, errors.New("没有可下载章节"), quality); view.ID != "" {
 				failedViews = append(failedViews, view)
 				if changed {
 					a.cond.Broadcast()
@@ -1086,11 +1208,17 @@ func (a *UIApp) enqueueDramas(ctx context.Context, dramas []Drama, updateOnly bo
 		}
 		a.removeParsingPlaceholderTaskLocked(drama)
 		a.removeFailedPlaceholderTaskLocked(drama)
+		if a.dramaDirectories == nil {
+			a.dramaDirectories = make(map[string]string)
+		}
+		a.dramaDirectories[drama.ID] = filepath.Dir(built[0].OutPath)
 		pathIndex := a.pathIndexLocked()
 		now := time.Now()
 		changed := true
 		for _, task := range built {
+			task.DownloadQuality = quality
 			if existing := pathIndex[task.OutPath]; existing != nil {
+				task.DownloadQuality = existing.Source.DownloadQuality
 				if existing.Status != uiStatusRunning {
 					existing.Source = task
 				}
@@ -1140,14 +1268,16 @@ func (a *UIApp) enqueueDramas(ctx context.Context, dramas []Drama, updateOnly bo
 	return views, failedViews, respErr
 }
 
-func (a *UIApp) addParsingPlaceholderTaskLocked(drama Drama) (uiTaskView, bool) {
+func (a *UIApp) addParsingPlaceholderTaskLocked(drama Drama, quality int) (uiTaskView, bool) {
 	task := a.placeholderTask(drama, "parsing")
+	task.DownloadQuality = quality
 	uiTask := newUITask(task, time.Now())
 	uiTask.Status = uiStatusParsing
 	uiTask.Progress = 0
 	uiTask.Phase = "parsing"
 	uiTask.Title = "正在解析章节"
 	if existing := a.tasks[uiTask.ID]; existing != nil {
+		existing.Source = task
 		existing.Status = uiStatusParsing
 		existing.CancelRequested = false
 		existing.PauseRequested = false
@@ -1207,8 +1337,9 @@ func sourceFromDramaID(id string) string {
 	return ""
 }
 
-func (a *UIApp) addFailedPlaceholderTaskLocked(drama Drama, cause error) (uiTaskView, bool) {
+func (a *UIApp) addFailedPlaceholderTaskLocked(drama Drama, cause error, quality int) (uiTaskView, bool) {
 	task := a.placeholderTask(drama, "fetch-failed")
+	task.DownloadQuality = quality
 	uiTask := newUITask(task, time.Now())
 	uiTask.Title = "章节获取失败"
 	uiTask.Status = uiStatusFailed
@@ -1216,6 +1347,7 @@ func (a *UIApp) addFailedPlaceholderTaskLocked(drama Drama, cause error) (uiTask
 	uiTask.Error = a.redactError(cause)
 	uiTask.Phase = "failed"
 	if existing := a.tasks[uiTask.ID]; existing != nil {
+		existing.Source = task
 		existing.Status = uiStatusFailed
 		existing.Title = "章节获取失败"
 		existing.Progress = 0
@@ -1274,8 +1406,18 @@ func (a *UIApp) handleTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
-	views := a.taskViewsLocked()
+	views := a.taskViewsForSourceLocked(r.Context())
 	merges := cloneMergeStates(a.merges)
+	for id := range merges {
+		if !dramaAllowed(r.Context(), id, "") {
+			delete(merges, id)
+			continue
+		}
+		merges[id].PlaybackTaskID = ""
+		if _, _, err := a.mergedPlaybackTaskLocked(mergedPlaybackPrefix + id); err == nil {
+			merges[id].PlaybackTaskID = mergedPlaybackPrefix + id
+		}
+	}
 	a.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"data": views, "merges": merges, "ffmpeg": a.downloader.ffmpegInstallation().snapshot()})
 }
@@ -1290,6 +1432,10 @@ func (a *UIApp) handleRetry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
+	if !a.requireTaskSourcesLocked(w, r, selection) {
+		a.mu.Unlock()
+		return
+	}
 	if a.parsingInFlight == nil {
 		a.parsingInFlight = map[string]bool{}
 	}
@@ -1309,7 +1455,7 @@ func (a *UIApp) handleRetry(w http.ResponseWriter, r *http.Request) {
 			}
 			a.parsingInFlight[dramaKey] = true
 			a.removeFailedPlaceholderTaskLocked(drama)
-			if _, placeholderChanged := a.addParsingPlaceholderTaskLocked(drama); placeholderChanged {
+			if _, placeholderChanged := a.addParsingPlaceholderTaskLocked(drama, task.Source.DownloadQuality); placeholderChanged {
 				changed = true
 			}
 			reparses = append(reparses, drama)
@@ -1334,7 +1480,7 @@ func (a *UIApp) handleRetry(w http.ResponseWriter, r *http.Request) {
 		_ = a.saveStateLocked()
 		a.cond.Broadcast()
 	}
-	views := a.taskViewsLocked()
+	views := a.taskViewsForSourceLocked(r.Context())
 	a.mu.Unlock()
 	for _, drama := range reparses {
 		a.startDramaParse(drama, true)
@@ -1352,6 +1498,10 @@ func (a *UIApp) handleCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
+	if !a.requireTaskSourcesLocked(w, r, selection) {
+		a.mu.Unlock()
+		return
+	}
 	now := time.Now()
 	changed := false
 	for _, id := range selection.idsLocked(a) {
@@ -1389,7 +1539,7 @@ func (a *UIApp) handleCancel(w http.ResponseWriter, r *http.Request) {
 	if changed {
 		_ = a.saveStateLocked()
 	}
-	views := a.taskViewsLocked()
+	views := a.taskViewsForSourceLocked(r.Context())
 	a.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"data": views})
 }
@@ -1404,6 +1554,10 @@ func (a *UIApp) handleClear(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
+	if !a.requireTaskSourcesLocked(w, r, taskSelection{IDs: ids}) {
+		a.mu.Unlock()
+		return
+	}
 	removed, pending := 0, 0
 	for _, id := range ids {
 		task := a.tasks[id]
@@ -1428,43 +1582,43 @@ func (a *UIApp) handleClear(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	_ = a.saveStateLocked()
-	views := a.taskViewsLocked()
+	views := a.taskViewsForSourceLocked(r.Context())
 	a.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"data": views, "removed": removed, "pending": pending})
 }
 
 func (a *UIApp) handleMerge(w http.ResponseWriter, r *http.Request) {
-	if rejectWatchOnly(w) {
-		return
-	}
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
 		return
 	}
-	ids, deleteEpisodes, ok := readMergeRequest(w, r)
-	if !ok {
+	ids, deleteEpisodes, async, ok := readMergeRequest(w, r)
+	if !ok || !requireDownload(w, r) || !a.requireDramaSources(w, r, ids) {
 		return
 	}
-
-	a.mergeMu.Lock()
-	defer a.mergeMu.Unlock()
-
 	a.mu.Lock()
-	byDrama := map[string][]*UITask{}
-	for _, id := range a.taskOrder {
-		task := a.tasks[id]
-		if task == nil || task.Status != uiStatusSuccess {
-			continue
-		}
-		byDrama[task.DramaID] = append(byDrama[task.DramaID], cloneUITask(task))
+	if !a.requireTaskSourcesLocked(w, r, taskSelection{DramaIDs: ids}) {
+		a.mu.Unlock()
+		return
 	}
+	jobs, err := a.enqueueMergesLocked(ids, deleteEpisodes)
 	a.mu.Unlock()
-
-	results := make([]uiMergeResult, 0, len(ids))
-	for _, dramaID := range ids {
-		items := byDrama[dramaID]
-		res := a.mergeDrama(r.Context(), dramaID, items, deleteEpisodes)
-		results = append(results, res)
+	if err != nil {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": a.redactError(err)})
+		return
+	}
+	if async {
+		writeJSON(w, http.StatusAccepted, map[string]any{"accepted": len(jobs), "async": true})
+		return
+	}
+	results := make([]uiMergeResult, 0, len(jobs))
+	for _, job := range jobs {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-job.done:
+			results = append(results, job.result)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": results})
 }
@@ -1559,6 +1713,11 @@ func (a *UIApp) mergeDrama(ctx context.Context, dramaID string, tasks []*UITask,
 		return res
 	}
 	res.Detail = method
+	if err := cmdCtx.Err(); err != nil {
+		res.Error = "合并已取消，原分集已保留"
+		a.setMergeState(res, "failed", 0, false, deleteEpisodes)
+		return res
+	}
 	if ok, _ := existingGood(partPath, a.cfg.SkipBytes); !ok {
 		res.Error = "合并输出文件无效"
 		a.setMergeState(res, "failed", 0, false, deleteEpisodes)
@@ -1612,13 +1771,20 @@ func (a *UIApp) setMergeState(res uiMergeResult, status string, progress int, sk
 	if a.merges == nil {
 		a.merges = map[string]*UIMergeState{}
 	}
+	if previous := a.merges[res.DramaID]; status == "failed" && previous != nil && previous.Status == "running" && previous.Progress > state.Progress {
+		state.Progress = previous.Progress
+	}
 	a.merges[res.DramaID] = state
 	_ = a.saveStateLocked()
 	a.mu.Unlock()
+	if status == "success" {
+		a.notifyEmbySync(res.DramaID)
+	}
 }
 
-func readMergeRequest(w http.ResponseWriter, r *http.Request) ([]string, bool, bool) {
+func readMergeRequest(w http.ResponseWriter, r *http.Request) ([]string, bool, bool, bool) {
 	var req struct {
+		Async          bool     `json:"async"`
 		DramaIDs       []string `json:"dramaIds"`
 		DeleteEpisodes bool     `json:"deleteEpisodes"`
 	}
@@ -1627,10 +1793,10 @@ func readMergeRequest(w http.ResponseWriter, r *http.Request) ([]string, bool, b
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json: " + err.Error()})
-		return nil, false, false
+		return nil, false, false, false
 	}
 	ids, ok := cleanIDList(w, req.DramaIDs)
-	return ids, req.DeleteEpisodes, ok
+	return ids, req.DeleteEpisodes, req.Async, ok
 }
 
 func (a *UIApp) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -1648,7 +1814,7 @@ func (a *UIApp) handleConfig(w http.ResponseWriter, r *http.Request) {
 	nextOutputDir := firstNonEmpty(a.nextOutputDir, cfg.outputDirSetting, cfg.OutputDir)
 	a.mu.Unlock()
 	proxyMode, proxyURL, proxyHasAuth := publicProxyConfig(cfg.ProxyURL)
-	writeJSON(w, http.StatusOK, map[string]any{"outputDir": cfg.OutputDir, "outputDirSetting": nextOutputDir, "restartRequired": !sameDirectory(cfg.OutputDir, nextOutputDir), "dataDir": cfg.dataDirectory(), "concurrency": cfg.Concurrency, "ffmpeg": cfg.FFmpeg, "address": addr, "libraryCachePath": libraryCachePath(cfg.dataDirectory()), "requestConcurrency": cfg.RequestConcurrency, "requestIntervalMs": cfg.RequestIntervalMS, "network": a.downloader.proxyRouter.summary(), "proxyMode": proxyMode, "proxyURL": proxyURL, "proxyHasAuth": proxyHasAuth, "watchOnly": watchOnlyMode()})
+	writeJSON(w, http.StatusOK, map[string]any{"outputDir": cfg.OutputDir, "groupBySource": cfg.GroupBySource, "outputDirSetting": nextOutputDir, "restartRequired": !sameDirectory(cfg.OutputDir, nextOutputDir), "dataDir": cfg.dataDirectory(), "concurrency": cfg.Concurrency, "ffmpeg": cfg.FFmpeg, "address": addr, "libraryCachePath": libraryCachePath(cfg.dataDirectory()), "requestConcurrency": cfg.RequestConcurrency, "requestIntervalMs": cfg.RequestIntervalMS, "network": a.downloader.proxyRouter.summary(), "proxyMode": proxyMode, "proxyURL": proxyURL, "proxyHasAuth": proxyHasAuth})
 }
 
 func readIDsRequest(w http.ResponseWriter, r *http.Request) ([]string, bool) {
@@ -1793,7 +1959,7 @@ func taskToView(task *UITask) uiTaskView {
 		MediaElapsedSeconds: task.MediaElapsedSeconds, MediaTotalSeconds: task.MediaTotalSeconds, Phase: task.Phase,
 		CreatedAt: task.CreatedAt, UpdatedAt: task.UpdatedAt, CancelRequested: task.CancelRequested,
 		RemoveRequested: task.RemoveRequested, PauseRequested: task.PauseRequested, ReleaseStatus: task.Source.ReleaseStatus,
-		Playable: isPlayableDownloadTask(task),
+		Playable: isPlayableDownloadTask(task), DownloadQuality: task.Source.DownloadQuality,
 	}
 }
 

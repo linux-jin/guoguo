@@ -25,12 +25,22 @@ func (app *UIApp) handlePlaybackHistory(writer http.ResponseWriter, request *htt
 	if !playbackRequestAllowed(writer, request, http.MethodGet) {
 		return
 	}
-	entries, err := app.playbackHistory().list()
+	viewer := requestViewer(writer, request)
+	if viewer == nil {
+		return
+	}
+	entries, err := viewer.playbackHistory().list()
 	if err != nil {
 		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": "无法读取观看记录：" + publicError(err).Error()})
 		return
 	}
-	writeJSON(writer, http.StatusOK, map[string]any{"data": entries, "limit": playbackHistoryLimit})
+	visible := make([]playbackHistoryEntry, 0, len(entries))
+	for _, entry := range entries {
+		if dramaAllowed(request.Context(), entry.DramaID, entry.Source) {
+			visible = append(visible, entry)
+		}
+	}
+	writeJSON(writer, http.StatusOK, map[string]any{"data": visible, "limit": playbackHistoryLimit})
 }
 
 func (app *UIApp) handlePlaybackHistoryRemove(writer http.ResponseWriter, request *http.Request) {
@@ -46,7 +56,14 @@ func (app *UIApp) handlePlaybackHistoryRemove(writer http.ResponseWriter, reques
 		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "请选择要删除的观看记录"})
 		return
 	}
-	if err := app.playbackHistory().remove(id, input.All); err != nil {
+	viewer := requestViewer(writer, request)
+	if viewer == nil {
+		return
+	}
+	if !input.All && !app.requireDramaSources(writer, request, []string{id}) {
+		return
+	}
+	if err := viewer.playbackHistory().removeForSources(request.Context(), id, input.All); err != nil {
 		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": "删除观看记录未能保存：" + publicError(err).Error()})
 		return
 	}
@@ -61,7 +78,10 @@ func (app *UIApp) handlePlaybackProgress(writer http.ResponseWriter, request *ht
 	if !readPlaybackRequest(writer, request, &input) {
 		return
 	}
-	entry, saved, err := app.recordPlaybackProgress(input.Session, input.Progress)
+	if !app.requirePlaybackOwner(writer, request, input.Session) {
+		return
+	}
+	entry, saved, err := app.recordPlaybackProgress(contextViewer(request.Context()), input.Session, input.Progress)
 	if err != nil {
 		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": publicError(err).Error()})
 		return
@@ -69,16 +89,23 @@ func (app *UIApp) handlePlaybackProgress(writer http.ResponseWriter, request *ht
 	writeJSON(writer, http.StatusOK, map[string]any{"saved": saved, "entry": entry})
 }
 
-func (app *UIApp) recordPlaybackProgress(id string, progress playbackHistoryProgress) (playbackHistoryEntry, bool, error) {
+func (app *UIApp) recordPlaybackProgress(viewer *viewerRecords, id string, progress playbackHistoryProgress) (playbackHistoryEntry, bool, error) {
 	if progress.Run == 0 || progress.Sequence == 0 || !validPlaybackHistoryTime(progress.Position) || !validPlaybackHistoryTime(progress.Duration) {
 		return playbackHistoryEntry{}, false, errors.New("观看进度无效")
 	}
-	store := app.playbackHistory()
+	if viewer == nil {
+		return playbackHistoryEntry{}, false, errors.New("浏览器身份无效")
+	}
+	store := viewer.playbackHistory()
 	app.playbackMu.Lock()
 	session := app.playbacks[id]
 	if session == nil || progress.Episode < 1 || progress.Episode > len(session.tasks) {
 		app.playbackMu.Unlock()
 		return playbackHistoryEntry{}, false, nil
+	}
+	if session.viewer != viewer {
+		app.playbackMu.Unlock()
+		return playbackHistoryEntry{}, false, errors.New("播放会话已过期，请重新打开本剧")
 	}
 	run, known := session.historyRuns[progress.Run]
 	if !known || run.episode != progress.Episode || progress.Sequence <= session.historySequence {
@@ -122,6 +149,7 @@ func (app *UIApp) recordPlaybackProgress(id string, progress playbackHistoryProg
 	saved, err := store.record(entry, session.openedAt)
 	if err == nil {
 		session.historySequence = progress.Sequence
+		app.touchPlaybackLocked(session)
 	}
 	app.playbackMu.Unlock()
 	if err == nil && saved {

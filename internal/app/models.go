@@ -8,6 +8,7 @@ import (
 )
 
 type Drama struct {
+	VIP               *bool              `json:"vip,omitempty"`
 	ID                string             `json:"id"`
 	Source            string             `json:"source,omitempty"`
 	SourceID          string             `json:"sourceId,omitempty"`
@@ -65,6 +66,7 @@ func (d Drama) DisplayTitle() string {
 }
 
 type Chapter struct {
+	VIP            bool            `json:"vip,omitempty"`
 	ID             string          `json:"id"`
 	Source         string          `json:"source,omitempty"`
 	Title          string          `json:"title"`
@@ -94,13 +96,14 @@ func (c Chapter) EpisodeString(fallback int) string {
 }
 
 type Task struct {
-	DramaID       string  `json:"dramaId"`
-	DramaTitle    string  `json:"dramaTitle"`
-	Chapter       Chapter `json:"chapter"`
-	Index         int     `json:"index"`
-	Total         int     `json:"total"`
-	OutPath       string  `json:"outPath"`
-	ReleaseStatus string  `json:"releaseStatus,omitempty"`
+	DramaID         string  `json:"dramaId"`
+	DramaTitle      string  `json:"dramaTitle"`
+	Chapter         Chapter `json:"chapter"`
+	Index           int     `json:"index"`
+	Total           int     `json:"total"`
+	OutPath         string  `json:"outPath"`
+	ReleaseStatus   string  `json:"releaseStatus,omitempty"`
+	DownloadQuality int     `json:"downloadQuality,omitempty"`
 }
 
 type Result struct {

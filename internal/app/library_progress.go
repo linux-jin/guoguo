@@ -36,9 +36,19 @@ func (a *UIApp) startLibraryRefreshLocked(source string) {
 	a.startLibraryLoadLocked(source, libraryLoadRefresh, nil)
 }
 
-func (a *UIApp) startLibraryLoadLocked(source string, mode libraryLoadMode, priority []string) {
+func (a *UIApp) startLibraryLoadLocked(source string, mode libraryLoadMode, priority []string, scopes ...context.Context) {
+	base := context.Background()
+	if len(scopes) > 0 && sourceScope(scopes[0]) != nil {
+		base = context.WithValue(base, accountSourceContextKey{}, sourceScope(scopes[0]))
+	}
 	if mode == libraryLoadUpdate || mode == libraryLoadMore {
-		a.enqueueHistoricalMetadataLocked(source, priority)
+		if source == "" && sourceScopeRestricted(base) {
+			for _, allowed := range sourceScope(base).Sources {
+				a.enqueueHistoricalMetadataLocked(allowed, priority)
+			}
+		} else {
+			a.enqueueHistoricalMetadataLocked(source, priority)
+		}
 	}
 	more := mode == libraryLoadMore
 	if more {
@@ -56,7 +66,7 @@ func (a *UIApp) startLibraryLoadLocked(source string, mode libraryLoadMode, prio
 		a.librarySources = map[string]librarySourceState{}
 	}
 	for _, provider := range []string{"cloudfront", sourceHuangguoAI, sourceHuangguoVideo, sourceHuangdou, sourceHongguo} {
-		if matchesSourceFilter(provider, source) {
+		if matchesSourceFilter(provider, source) && sourceAllowed(base, provider) {
 			state := a.librarySources[provider]
 			state.Status = "loading"
 			state.Error = ""
@@ -64,7 +74,7 @@ func (a *UIApp) startLibraryLoadLocked(source string, mode libraryLoadMode, prio
 		}
 	}
 	a.libraryRevision++
-	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Minute)
+	ctx, cancel := context.WithTimeout(base, 12*time.Minute)
 	a.libraryCancel = cancel
 	ctx = context.WithValue(ctx, libraryProgressKey{}, libraryProgressFunc(a.acceptLibraryProgress))
 	ctx = context.WithValue(ctx, libraryMoreKey{}, more)

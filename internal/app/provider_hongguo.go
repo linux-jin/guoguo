@@ -250,7 +250,7 @@ func hongguoCoverAddress(values ...string) string {
 			continue
 		}
 		parsed, err := url.Parse(value)
-		if err == nil && validImageURL(parsed) && isHongguoImageHost(parsed.Hostname()) {
+		if err == nil && validImageURL(parsed) {
 			return value
 		}
 	}
@@ -266,7 +266,7 @@ func hongguoDramaFromAny(v any, category string) Drama {
 	if len(vd) == 0 {
 		vd = m
 	}
-	sourceID := firstNonEmpty(mapString(vd, "series_id"), mapString(m, "series_id"), mapString(vd, "keyword"), mapString(m, "keyword"))
+	sourceID := firstNonEmpty(mapString(vd, "series_id_str", "series_id"), mapString(m, "series_id_str", "series_id"), mapString(vd, "keyword"), mapString(m, "keyword"))
 	if !hongguoNumericID.MatchString(sourceID) {
 		return Drama{}
 	}

@@ -19,12 +19,13 @@ const hongguoAppBaseURL = "https://api5-normal-sinfonlineb.fqnovel.com"
 const hongguoAppUserAgent = "com.phoenix.read/73532 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)"
 
 type hongguoCatalogCursor struct {
-	Offset      int       `json:"offset"`
-	SessionID   string    `json:"sessionId,omitempty"`
-	LastID      string    `json:"lastId,omitempty"`
-	Initialized bool      `json:"initialized"`
-	Exhausted   bool      `json:"exhausted"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	Offset        int       `json:"offset"`
+	SessionID     string    `json:"sessionId,omitempty"`
+	LastID        string    `json:"lastId,omitempty"`
+	PageSignature string    `json:"pageSignature,omitempty"`
+	Initialized   bool      `json:"initialized"`
+	Exhausted     bool      `json:"exhausted"`
+	UpdatedAt     time.Time `json:"updatedAt"`
 }
 
 type hongguoCatalogState struct {
@@ -43,6 +44,8 @@ type hongguoAppClient struct {
 	pending        map[string]*hongguoDetailCall
 	searches       map[string]hongguoSearchEntry
 	searchPending  map[string]*hongguoSearchCall
+	suggestions    map[string]hongguoSuggestionEntry
+	suggestPending map[string]*hongguoSuggestionCall
 	danmaku        map[string]hongguoDanmakuCacheEntry
 	danmakuPending map[string]*hongguoDanmakuCall
 }
@@ -54,6 +57,7 @@ func (downloader *Downloader) hongguoClient() *hongguoAppClient {
 			state:   hongguoCatalogState{Version: 1, DeviceID: newHongguoDeviceID(), InstallID: newHongguoDeviceID(), Feeds: map[string]hongguoCatalogCursor{}},
 			details: map[string]hongguoDetailEntry{}, pending: map[string]*hongguoDetailCall{},
 			searches: map[string]hongguoSearchEntry{}, searchPending: map[string]*hongguoSearchCall{},
+			suggestions: map[string]hongguoSuggestionEntry{}, suggestPending: map[string]*hongguoSuggestionCall{},
 		}
 	})
 	return downloader.hongguo

@@ -96,18 +96,10 @@ func (d *Downloader) fetchHuangdouDramas(ctx context.Context) ([]Drama, error) {
 }
 
 func (d *Downloader) fetchHuangdouChapters(ctx context.Context, sourceID string) (string, []Chapter, error) {
-	client := newHuangdouAPIClient(d)
 	sourceID = strings.TrimPrefix(strings.TrimSpace(sourceID), "rp_")
-	if sourceID == "" {
-		return "", nil, fmt.Errorf("empty huangdou sourceID")
-	}
-	var decoded any
-	if err := client.call(ctx, "/drama/detail", map[string]any{"id": sourceID}, &decoded); err != nil {
+	data, err := d.huangdouDetail(ctx, sourceID)
+	if err != nil {
 		return "", nil, err
-	}
-	data := huangdouDataMap(decoded)
-	if len(data) == 0 {
-		return "", nil, fmt.Errorf("huangdou detail is empty")
 	}
 	title := firstNonEmpty(mapString(data, "name", "title", "t"), sourceID)
 	episodes := huangdouList(data["episodes"])
@@ -126,11 +118,11 @@ func (d *Downloader) fetchHuangdouChapters(ctx context.Context, sourceID string)
 				seq = i + 1
 			}
 			titleText := firstNonEmpty(mapString(ep, "name", "title"), fmt.Sprintf("第%d集", seq))
-			chapters = append(chapters, Chapter{ID: providerChapterID(sourceHuangdou, sourceID, strconv.Itoa(seq)), Source: sourceHuangdou, Title: titleText, CurrentEpisode: rawEpisode(seq)})
+			chapters = append(chapters, Chapter{VIP: huangdouEpisodeVIP(data, ep, seq), ID: providerChapterID(sourceHuangdou, sourceID, strconv.Itoa(seq)), Source: sourceHuangdou, Title: titleText, CurrentEpisode: rawEpisode(seq)})
 		}
 	} else {
 		for i := 1; i <= count; i++ {
-			chapters = append(chapters, Chapter{ID: providerChapterID(sourceHuangdou, sourceID, strconv.Itoa(i)), Source: sourceHuangdou, Title: fmt.Sprintf("第%d集", i), CurrentEpisode: rawEpisode(i)})
+			chapters = append(chapters, Chapter{VIP: huangdouEpisodeVIP(data, nil, i), ID: providerChapterID(sourceHuangdou, sourceID, strconv.Itoa(i)), Source: sourceHuangdou, Title: fmt.Sprintf("第%d集", i), CurrentEpisode: rawEpisode(i)})
 		}
 	}
 	sortProviderChapters(chapters)
@@ -420,7 +412,7 @@ func huangdouDramaFromMap(item map[string]any) Drama {
 		}
 	}
 	category := firstNonEmpty(mapString(item, "category", "category_name", "categoryName"), "未分类")
-	return Drama{ID: providerDramaID(sourceHuangdou, sourceID), Source: sourceHuangdou, SourceID: sourceID, Title: title, Name: title, Desc: firstNonEmpty(mapString(item, "description"), mapString(item, "summary")), Intro: firstNonEmpty(mapString(item, "description"), mapString(item, "summary")), Cover: cover, CoverURL: cover, CategoryName: category, ChannelName: "tideember.cc", Remark: remark, TotalEpisode: mapString(item, "episode_count"), EpisodeCount: mapString(item, "episode_count"), Tags: mapStringSlice(item, "tags"), ReleaseStatus: releaseStatus, Heat: mapString(item, "hot_rate"), Views: normalizeViews(mapString(item, "click")), OnlineDate: providerReleaseDate(mapString(item, "issue_date"))}
+	return Drama{VIP: huangdouVIPFlag(item), ID: providerDramaID(sourceHuangdou, sourceID), Source: sourceHuangdou, SourceID: sourceID, Title: title, Name: title, Desc: firstNonEmpty(mapString(item, "description"), mapString(item, "summary")), Intro: firstNonEmpty(mapString(item, "description"), mapString(item, "summary")), Cover: cover, CoverURL: cover, CategoryName: category, ChannelName: "tideember.cc", Remark: remark, TotalEpisode: mapString(item, "episode_count"), EpisodeCount: mapString(item, "episode_count"), Tags: mapStringSlice(item, "tags"), ReleaseStatus: releaseStatus, Heat: mapString(item, "hot_rate"), Views: normalizeViews(mapString(item, "click")), OnlineDate: providerReleaseDate(mapString(item, "issue_date"))}
 }
 
 func huangdouDataMap(v any) map[string]any {

@@ -1,26 +1,22 @@
-# 剧库：Go 静态编译 + Debian FFmpeg（含 libx264 / AAC）
-# 本地：docker compose up --build
-# Render：监听 $PORT，数据写到 /data 持久盘，必须设置 Basic Auth。
-FROM golang:1.24-bookworm AS build
+ARG GO_IMAGE=golang:1.26-bookworm
+ARG RUNTIME_IMAGE=debian:bookworm-slim
+FROM ${GO_IMAGE} AS build
+ENV GOPROXY=https://goproxy.cn,direct GOSUMDB=off
 WORKDIR /src
-COPY go.mod main.go ./
+COPY go.mod go.sum ./
+RUN go mod download
+COPY main.go ./
 COPY internal ./internal
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w" -o /out/juku .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/juku .
 
-FROM debian:bookworm-slim
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates tzdata tini \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --create-home --uid 1000 --shell /usr/sbin/nologin juku \
-    && mkdir -p /data /downloads \
-    && chown -R juku:juku /data /downloads
+FROM ${RUNTIME_IMAGE}
+ENV TZ=Asia/Shanghai
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg tzdata tini curl && rm -rf /var/lib/apt/lists/* && groupadd --gid 1000 juku && useradd --uid 1000 --gid juku --no-create-home juku && mkdir -p /data /downloads && chown juku:juku /data /downloads
 COPY --from=build /out/juku /usr/local/bin/juku
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod 755 /usr/local/bin/docker-entrypoint.sh
-USER juku
+USER 1000:1000
 WORKDIR /data
-ENV TZ=Asia/Shanghai \
-    JUKU_FFMPEG=ffmpeg
-EXPOSE 8999
 VOLUME ["/data", "/downloads"]
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
+EXPOSE 8998
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 CMD curl --noproxy '*' --fail --silent --output /dev/null http://127.0.0.1:8998/ || exit 1
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/juku"]
+CMD ["-open=false", "-listen", "0.0.0.0:8998", "-data-dir", "/data", "-out", "/downloads", "-ffmpeg", "/usr/bin/ffmpeg"]

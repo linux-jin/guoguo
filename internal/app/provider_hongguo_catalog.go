@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -102,27 +104,19 @@ func (downloader *Downloader) fetchHongguoAppCatalog(ctx context.Context) ([]Dra
 			if cursor.Offset > 0 {
 				payload["client_req_type"] = 2
 			}
-			result, err := downloader.hongguoAppRequest(ctx, http.MethodPost, "/reading/distribution/category/landpage/v/", nil, payload)
-			if err != nil && cursor.SessionID != "" && ctx.Err() == nil {
-				payload["session_id"] = ""
-				result, err = downloader.hongguoAppRequest(ctx, http.MethodPost, "/reading/distribution/category/landpage/v/", nil, payload)
-			}
-			data := nestedMap(result, "data")
-			rows, valid := data["video_data"].([]any)
-			if err == nil && !valid {
-				err = errors.New("App 分类数据格式异常")
-			}
-			if err != nil {
-				failures = append(failures, fmt.Errorf("%s: %w", genre.name, err))
-				scan.done = true
-				continue
-			}
-			items := make([]Drama, 0, len(rows))
+			var items []Drama
+			var nextCursor hongguoCatalogCursor
+			var pageErr error
 			newItems := 0
-			for _, row := range rows {
-				drama := hongguoDramaFromAny(row, genre.name)
-				if drama.ID != "" {
-					items = append(items, drama)
+			for attempt := 0; attempt < 2; attempt++ {
+				result, err := downloader.hongguoAppRequest(ctx, http.MethodPost, "/reading/distribution/category/landpage/v/", nil, payload)
+				retryable := err == nil || cursor.SessionID != ""
+				items = nil
+				if err == nil {
+					items, nextCursor, err = parseHongguoCatalogPage(result, cursor, genre.name)
+				}
+				newItems = 0
+				for _, drama := range items {
 					if !known[drama.ID] {
 						newItems++
 					}
@@ -133,39 +127,26 @@ func (downloader *Downloader) fetchHongguoAppCatalog(ctx context.Context) ([]Dra
 						dramas = append(dramas, drama)
 					}
 				}
-			}
-			if len(rows) > 0 && len(items) == 0 {
-				failures = append(failures, fmt.Errorf("%s: App 分类未返回可识别的剧集", genre.name))
-				scan.done = true
-				continue
-			}
-			next, parseErr := strconv.Atoi(mapString(data, "next_offset"))
-			hasMore, paginationOK := data["has_more"].(bool)
-			if !paginationOK || hasMore && parseErr != nil {
-				failures = append(failures, fmt.Errorf("%s: App 分页标记无效，已保留上次位置", genre.name))
-				scan.done = true
+				pageErr = err
+				if err == nil {
+					break
+				}
 				reportLibraryProgress(ctx, sourceHongguo, items, nil, false)
-				continue
+				var backoff *requestBackoff
+				if attempt > 0 || !retryable || errors.As(err, &backoff) || ctx.Err() != nil {
+					break
+				}
+				payload["session_id"] = ""
 			}
-			if parseErr != nil {
-				next = cursor.Offset + len(rows)
+			if err := ctx.Err(); err != nil {
+				return dramas, err
 			}
-			lastID := ""
-			if len(items) > 0 {
-				lastID = items[len(items)-1].ID
-			}
-			if hasMore && (len(items) == 0 || next <= cursor.Offset || next > 1_000_000 || lastID == cursor.LastID) {
-				failures = append(failures, fmt.Errorf("%s: App 分页未前进，已保留上次位置", genre.name))
+			if pageErr != nil {
+				failures = append(failures, fmt.Errorf("%s: %w", genre.name, pageErr))
 				scan.done = true
-				reportLibraryProgress(ctx, sourceHongguo, items, nil, false)
 				continue
 			}
-			cursor.Exhausted = !hasMore
-			cursor.Initialized = true
-			cursor.Offset = next
-			cursor.SessionID = mapString(data, "session_id")
-			cursor.LastID = lastID
-			cursor.UpdatedAt = time.Now()
+			cursor = nextCursor
 			scan.pages++
 			scan.cursor = cursor
 			scan.done = cursor.Exhausted
@@ -195,4 +176,53 @@ func (downloader *Downloader) fetchHongguoAppCatalog(ctx context.Context) ([]Dra
 	}
 	sort.SliceStable(dramas, func(left, right int) bool { return dramas[left].DisplayTitle() < dramas[right].DisplayTitle() })
 	return dramas, errors.Join(failures...)
+}
+
+func parseHongguoCatalogPage(result map[string]any, cursor hongguoCatalogCursor, category string) ([]Drama, hongguoCatalogCursor, error) {
+	data := nestedMap(result, "data")
+	rows, valid := data["video_data"].([]any)
+	if !valid {
+		return nil, cursor, errors.New("App 分类数据格式异常")
+	}
+	items := make([]Drama, 0, len(rows))
+	ids := make([]string, 0, len(rows))
+	seen := map[string]bool{}
+	for _, row := range rows {
+		drama := hongguoDramaFromAny(row, category)
+		if drama.ID != "" {
+			items = append(items, drama)
+			if !seen[drama.ID] {
+				seen[drama.ID] = true
+				ids = append(ids, drama.ID)
+			}
+		}
+	}
+	if len(rows) > 0 && len(items) == 0 {
+		return items, cursor, errors.New("App 分类未返回可识别的剧集")
+	}
+	next, parseErr := strconv.Atoi(mapString(data, "next_offset"))
+	hasMore, paginationOK := data["has_more"].(bool)
+	if !paginationOK || hasMore && parseErr != nil {
+		return items, cursor, errors.New("App 分页标记无效，已保留上次位置")
+	}
+	if parseErr != nil {
+		next = cursor.Offset + len(rows)
+	}
+	lastID, signature := "", ""
+	if len(items) > 0 {
+		lastID = items[len(items)-1].ID
+		sort.Strings(ids)
+		signature = fmt.Sprintf("%x", sha256.Sum256([]byte(strings.Join(ids, "\n"))))
+	}
+	if hasMore && (len(items) == 0 || next <= cursor.Offset || next > 1_000_000 || signature == cursor.PageSignature) {
+		return items, cursor, errors.New("App 分页未前进，已保留上次位置")
+	}
+	cursor.Exhausted = !hasMore
+	cursor.Initialized = true
+	cursor.Offset = next
+	cursor.SessionID = mapString(data, "session_id")
+	cursor.LastID = lastID
+	cursor.PageSignature = signature
+	cursor.UpdatedAt = time.Now()
+	return items, cursor, nil
 }

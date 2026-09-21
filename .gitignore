@@ -14,5 +14,3 @@
 /bin/ffmpeg.exe
 /bin/ffprobe
 /bin/ffprobe.exe
-**/.DS_Store
-/bin/.ffmpeg-install-*/

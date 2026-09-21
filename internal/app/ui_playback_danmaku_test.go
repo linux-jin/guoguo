@@ -204,7 +204,8 @@ func TestPlaybackDanmakuValidationAndStreamIsolation(t *testing.T) {
 	timer := time.NewTimer(time.Hour)
 	defer timer.Stop()
 	session := &playbackSession{id: "current", tasks: []Task{task}, state: "streaming", run: 7, duration: 160, timer: timer, cancel: func() { streamCanceled.Add(1) }}
-	app := &UIApp{downloader: d, playbacks: map[string]*playbackSession{"current": session}}
+	app := &UIApp{cfg: d.cfg, downloader: d, playbacks: map[string]*playbackSession{"current": session}}
+	session.viewer = fixtureViewer(app)
 	query := "?session=current&episode=1&start=0&duration=160000"
 	for _, tc := range []struct {
 		query, method, origin string
@@ -220,7 +221,7 @@ func TestPlaybackDanmakuValidationAndStreamIsolation(t *testing.T) {
 		request := httptest.NewRequest(tc.method, "http://localhost/api/ui/playback/danmaku"+tc.query, nil)
 		request.Header.Set("Origin", tc.origin)
 		writer := httptest.NewRecorder()
-		app.handlePlaybackDanmaku(writer, request)
+		app.handlePlaybackDanmaku(writer, viewerFixtureRequest(app, request))
 		if writer.Code != tc.status {
 			t.Errorf("%s: got %d, want %d", tc.query, writer.Code, tc.status)
 		}
@@ -234,9 +235,9 @@ func TestPlaybackDanmakuValidationAndStreamIsolation(t *testing.T) {
 	}
 	bad := task
 	bad.Chapter.Source = "other"
-	app.playbacks["unsupported"] = &playbackSession{tasks: []Task{bad}}
+	app.playbacks["unsupported"] = &playbackSession{viewer: session.viewer, tasks: []Task{bad}}
 	writer := httptest.NewRecorder()
-	app.handlePlaybackDanmaku(writer, httptest.NewRequest(http.MethodGet, "http://localhost/api/ui/playback/danmaku"+strings.Replace(query, "current", "unsupported", 1), nil))
+	app.handlePlaybackDanmaku(writer, viewerFixtureRequest(app, httptest.NewRequest(http.MethodGet, "http://localhost/api/ui/playback/danmaku"+strings.Replace(query, "current", "unsupported", 1), nil)))
 	if writer.Code != 404 || calls.Load() != 0 {
 		t.Fatal("invalid requests reached the source")
 	}
@@ -246,7 +247,7 @@ func TestPlaybackDanmakuValidationAndStreamIsolation(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		app.handlePlaybackDanmaku(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "http://localhost/api/ui/playback/danmaku"+query, nil).WithContext(ctx))
+		app.handlePlaybackDanmaku(httptest.NewRecorder(), viewerFixtureRequest(app, httptest.NewRequest(http.MethodGet, "http://localhost/api/ui/playback/danmaku"+query, nil).WithContext(ctx)))
 	}()
 	<-started
 	view, found := app.playbackStatus("current", false)

@@ -1,8 +1,7 @@
 (() => {
-  const pages = ['library', 'following', 'downloads'];
+  const pages = ['library', 'following', 'downloads', 'users'];
   const native = new WeakMap();
   let currentPage = pages.includes(location.hash.slice(1)) ? location.hash.slice(1) : 'library';
-  if (currentPage === 'downloads' && document.body.classList.contains('watch-only')) currentPage = 'library';
   let active = null, pendingBack = false, pendingOpen = null, pendingPage = '', pendingClose = '', listener = null;
   const state = (dialog = '', layer = '') => ({duanju: true, page: currentPage, dialog, layer});
   const url = () => location.pathname + location.search + '#' + currentPage;
@@ -46,7 +45,6 @@
   }
 
   function navigate(page) {
-    if (document.body.classList.contains('watch-only') && page === 'downloads') page = 'library';
     if (!pages.includes(page)) return;
     if (active) close(active);
     if (pendingBack) {pendingPage = page; return;}
@@ -58,7 +56,7 @@
 
   function layer(name, visible) {
     if (!active) return;
-    if (visible && history.state?.layer !== name) history.pushState(state(active.id, name), '', url());
+    if (visible && history.state?.layer !== name) history[history.state?.layer ? 'replaceState' : 'pushState'](state(active.id, name), '', url());
     if (!visible && history.state?.layer === name && !pendingBack) {
       pendingBack = true;
       history.back();

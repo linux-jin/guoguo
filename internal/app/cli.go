@@ -84,6 +84,8 @@ func usage() {
   -ui=true|false               启动/关闭本地浏览器管理界面，默认 true
   -listen 地址                UI 监听地址，默认 0.0.0.0:8998，支持局域网访问
   -open=true|false            UI 模式是否自动打开浏览器，默认 true
+  -admin-user 用户名           管理员账号，首次默认 admin
+  -admin-password 密码         指定管理员密码；首次未指定时随机生成并输出，首次登录须修改
   -mode all|search|id|list    CLI 模式，需配合 -ui=false，默认 all
   -keyword 关键词             search 模式关键词
   -id 剧ID                    id 模式下载单部剧
@@ -117,6 +119,8 @@ func Run() {
 	configFile := flag.String("config", "", "import a legacy config on first startup")
 	dataDir := flag.String("data-dir", "data", "configuration, cache and task directory")
 	ffmpeg := flag.String("ffmpeg", "", "ffmpeg path")
+	adminUser := flag.String("admin-user", "", "administrator username, default admin on first startup")
+	adminPassword := flag.String("admin-password", "", "administrator password; default random on first startup")
 	uiMode := flag.Bool("ui", true, "start local web UI")
 	listen := flag.String("listen", defaultUIListenAddress, "UI listen address; use 127.0.0.1:8998 for local-only access")
 	open := flag.Bool("open", true, "open browser automatically in UI mode")
@@ -126,7 +130,6 @@ func Run() {
 	flag.Var(&insecureTLS, "insecure-tls", "skip TLS certificate verification")
 	help := flag.Bool("help", false, "show help")
 	flag.Parse()
-	applyHostedListenDefaults(listen, open)
 	if *help {
 		usage()
 		return
@@ -147,6 +150,13 @@ func Run() {
 		fmt.Fprintln(os.Stderr, "初始化配置失败:", publicError(configErr))
 		os.Exit(2)
 	}
+	cfg.adminUsername = firstNonEmpty(*adminUser, os.Getenv("JUKU_ADMIN_USER"), "admin")
+	cfg.adminUserExplicit = flagWasSet("admin-user") || os.Getenv("JUKU_ADMIN_USER") != ""
+	cfg.adminPassword = os.Getenv("JUKU_ADMIN_PASSWORD")
+	if flagWasSet("admin-password") {
+		cfg.adminPassword = *adminPassword
+	}
+	cfg.adminPasswordExplicit = flagWasSet("admin-password") || os.Getenv("JUKU_ADMIN_PASSWORD") != ""
 	if *concurrency > 0 {
 		cfg.Concurrency = *concurrency
 	}
@@ -169,19 +179,19 @@ func Run() {
 		fmt.Fprintf(os.Stderr, "创建输出目录失败: %v\n", err)
 		os.Exit(1)
 	}
-	_, ffmpegErr := exec.LookPath(cfg.FFmpeg)
-	fmt.Printf("输出目录: %s\n下载并发: %d\nFFmpeg 可用: %t\nTLS证书校验: %t\n", cfg.OutputDir, cfg.Concurrency, ffmpegErr == nil, !cfg.InsecureTLS)
+	_, ffmpegErr := exec.LookPath(portableFFmpeg(cfg.FFmpeg))
+	fmt.Printf("输出目录: %s\n下载并发: %d\nFFmpeg 已找到（后台校验）: %t\nTLS证书校验: %t\n", cfg.OutputDir, cfg.Concurrency, ffmpegErr == nil, !cfg.InsecureTLS)
 	d.recordDiagnostic(diagnosticEvent{Level: "info", Event: "app.started", Message: "短剧库已启动"})
 	fmt.Printf("诊断日志: %s\n", d.diagnostics.path)
 	if ffmpegErr != nil {
-		fmt.Println("未找到 FFmpeg，将自动下载匹配当前系统的便携版本；如下载失败，请在界面中调整代理后重试。")
+		if automaticFFmpeg(cfg.FFmpeg) {
+			fmt.Println("未找到 FFmpeg，将自动下载匹配当前系统的便携版本；如下载失败，请在界面中调整代理后重试。")
+		} else {
+			fmt.Println("指定的 FFmpeg 路径未找到，请更正 download.ffmpeg 或 -ffmpeg。")
+		}
 	}
 
 	if *uiMode {
-		if err := requireHostedAuth(); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(2)
-		}
 		addr := normalizeListen(*listen)
 		app := NewUIApp(d)
 		pageURL := publicURL(addr)

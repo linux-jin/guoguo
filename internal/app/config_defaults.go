@@ -17,31 +17,36 @@ const (
 )
 
 type Config struct {
-	settingsLoaded     bool
-	dataDir            string
-	outputDirSetting   string
-	APIBase            string `json:"apiBase"`
-	CDNURL             string `json:"cdnURL"`
-	Token              string `json:"token"`
-	AESKeyHex          string `json:"aesKeyHex"`
-	InterfaceKey       string `json:"interfaceKey"`
-	ParamKey           string `json:"paramKey"`
-	ParamIV            string `json:"paramIV"`
-	OutputDir          string `json:"outputDir"`
-	FFmpeg             string `json:"ffmpeg"`
-	Concurrency        int    `json:"concurrency"`
-	RequestConcurrency int    `json:"requestConcurrency"`
-	RequestIntervalMS  int    `json:"requestIntervalMs"`
-	MaxPagesPerSort    int    `json:"maxPagesPerSort"`
-	PageSize           int    `json:"pageSize"`
-	Retries            int    `json:"retries"`
-	SkipBytes          int64  `json:"skipBytes"`
-	InsecureTLS        bool   `json:"insecureTLS"`
-	ProxyURL           string `json:"proxyURL,omitempty"`
-	HuangguoAIURL      string `json:"huangguoAIURL,omitempty"`
-	HuangguoVideoURL   string `json:"huangguoVideoURL,omitempty"`
-	HuangdouURL        string `json:"huangdouURL,omitempty"`
-	HongguoURL         string `json:"hongguoURL,omitempty"`
+	adminUsername         string
+	adminPassword         string
+	adminUserExplicit     bool
+	adminPasswordExplicit bool
+	settingsLoaded        bool
+	dataDir               string
+	outputDirSetting      string
+	APIBase               string `json:"apiBase"`
+	CDNURL                string `json:"cdnURL"`
+	Token                 string `json:"token"`
+	AESKeyHex             string `json:"aesKeyHex"`
+	InterfaceKey          string `json:"interfaceKey"`
+	ParamKey              string `json:"paramKey"`
+	ParamIV               string `json:"paramIV"`
+	OutputDir             string `json:"outputDir"`
+	GroupBySource         bool   `json:"groupBySource"`
+	FFmpeg                string `json:"ffmpeg"`
+	Concurrency           int    `json:"concurrency"`
+	RequestConcurrency    int    `json:"requestConcurrency"`
+	RequestIntervalMS     int    `json:"requestIntervalMs"`
+	MaxPagesPerSort       int    `json:"maxPagesPerSort"`
+	PageSize              int    `json:"pageSize"`
+	Retries               int    `json:"retries"`
+	SkipBytes             int64  `json:"skipBytes"`
+	InsecureTLS           bool   `json:"insecureTLS"`
+	ProxyURL              string `json:"proxyURL,omitempty"`
+	HuangguoAIURL         string `json:"huangguoAIURL,omitempty"`
+	HuangguoVideoURL      string `json:"huangguoVideoURL,omitempty"`
+	HuangdouURL           string `json:"huangdouURL,omitempty"`
+	HongguoURL            string `json:"hongguoURL,omitempty"`
 }
 
 func defaultConfig() Config {

@@ -30,7 +30,7 @@ func (app *UIApp) handlePlaybackNativeOpen(writer http.ResponseWriter, request *
 	if request.Context().Err() != nil {
 		return
 	}
-	run, status, err := app.beginPlayback(context.Background(), input.Session, input.Episode, input.Start, input.Quality, input.Version, true)
+	run, status, err := app.beginPlayback(context.WithoutCancel(request.Context()), input.Session, input.Episode, input.Start, input.Quality, input.Version, true)
 	if err != nil {
 		writeJSON(writer, status, map[string]string{"error": err.Error()})
 		return
@@ -42,10 +42,6 @@ func (app *UIApp) handlePlaybackNativeOpen(writer http.ResponseWriter, request *
 	prefetched := cache != nil
 	if cache == nil {
 		cache = newPlaybackNative(app, run.ctx, run.task, run.downloadID, input.Quality, input.Start, false)
-	} else {
-		cache.mu.Lock()
-		cache.background = false
-		cache.mu.Unlock()
 	}
 	stop := func() { run.stop(); cache.Close() }
 	app.playbackMu.Lock()
@@ -97,7 +93,7 @@ func (app *UIApp) handlePlaybackNativeAsset(writer http.ResponseWriter, request 
 	}
 	app.playbackMu.Lock()
 	session := app.playbacks[query.Get("session")]
-	if session == nil || session.run != run || session.native == nil {
+	if !viewerOwnsPlayback(request.Context(), session) || session.run != run || session.native == nil {
 		app.playbackMu.Unlock()
 		writeJSON(writer, http.StatusGone, map[string]string{"error": "此播放流已结束，请重新选择分集"})
 		return

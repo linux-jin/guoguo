@@ -79,7 +79,11 @@ func (app *UIApp) handleFollowing(writer http.ResponseWriter, request *http.Requ
 	if !playbackRequestAllowed(writer, request, http.MethodGet) {
 		return
 	}
-	entries, err := app.followingStore().list()
+	viewer := requestViewer(writer, request)
+	if viewer == nil {
+		return
+	}
+	entries, err := viewer.followingStore().list()
 	if err != nil {
 		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": "无法读取追剧清单：" + publicError(err).Error()})
 		return
@@ -91,6 +95,9 @@ func (app *UIApp) handleFollowing(writer http.ResponseWriter, request *http.Requ
 	known := app.followingMetadata(ids)
 	result := make([]followingView, 0, len(entries))
 	for _, entry := range entries {
+		if !dramaAllowed(request.Context(), entry.DramaID, entry.Source) {
+			continue
+		}
 		view := followingView{followingEntry: entry, TotalEpisode: entry.KnownEpisodes}
 		if current, exists := known[entry.DramaID]; exists {
 			view.Title = current.Title
@@ -122,13 +129,20 @@ func (app *UIApp) handleFollowingUpdate(writer http.ResponseWriter, request *htt
 		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "追剧操作或剧集 ID 无效"})
 		return
 	}
+	viewer := requestViewer(writer, request)
+	if viewer == nil {
+		return
+	}
+	if !app.requireDramaSources(writer, request, []string{id}) {
+		return
+	}
 	metadata := app.followingMetadata([]string{id})[id]
 	if metadata.DramaID == "" {
-		if history, exists := app.playbackHistory().get(id); exists {
+		if history, exists := viewer.playbackHistory().get(id); exists {
 			metadata = followingEntry{DramaID: id, Source: history.Source, Title: followingText(history.Title, 4096), KnownEpisodes: history.Total}
 		}
 	}
-	entry, err := app.followingStore().update(id, func(previous followingEntry, exists bool) (followingEntry, error) {
+	entry, err := viewer.followingStore().update(id, func(previous followingEntry, exists bool) (followingEntry, error) {
 		if !exists {
 			if metadata.DramaID == "" {
 				return followingEntry{}, errFollowingUnknown
@@ -161,5 +175,6 @@ func (app *UIApp) handleFollowingUpdate(writer http.ResponseWriter, request *htt
 		writeJSON(writer, status, map[string]string{"error": "追剧操作未保存：" + publicError(err).Error()})
 		return
 	}
+	app.notifyEmbySync()
 	writeJSON(writer, http.StatusOK, map[string]any{"ok": true, "entry": entry})
 }

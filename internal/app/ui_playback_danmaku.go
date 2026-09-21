@@ -63,7 +63,7 @@ func (app *UIApp) handlePlaybackDanmaku(writer http.ResponseWriter, request *htt
 	}
 	app.playbackMu.Lock()
 	session := app.playbacks[query.Get("session")]
-	if session == nil {
+	if !viewerOwnsPlayback(request.Context(), session) {
 		app.playbackMu.Unlock()
 		writeJSON(writer, http.StatusGone, map[string]string{"error": "播放会话已过期"})
 		return

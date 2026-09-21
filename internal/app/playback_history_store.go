@@ -186,7 +186,7 @@ func (store *playbackHistoryStore) flush() error {
 	revision := store.revision
 	data := playbackHistoryFile{Version: 1, Entries: store.listLocked()}
 	store.mu.Unlock()
-	if err := os.MkdirAll(filepath.Dir(store.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(store.path), 0o700); err != nil {
 		return err
 	}
 	file, err := os.CreateTemp(filepath.Dir(store.path), ".playback-history-*.json")
@@ -212,9 +212,4 @@ func (store *playbackHistoryStore) flush() error {
 	store.saved = revision
 	store.mu.Unlock()
 	return nil
-}
-
-func (app *UIApp) playbackHistory() *playbackHistoryStore {
-	app.historyOnce.Do(func() { app.history = newPlaybackHistoryStore(app.cfg.dataDirectory()) })
-	return app.history
 }

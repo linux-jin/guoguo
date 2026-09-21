@@ -64,31 +64,7 @@ func (downloader *Downloader) selectPlaybackQuality(ctx context.Context, media p
 		}
 	}
 	lines := strings.Split(media.Playlist, "\n")
-	type variant struct {
-		line    int
-		quality int
-		uri     string
-	}
-	var variants []variant
-	for i := 0; i+1 < len(lines); i++ {
-		line := strings.TrimSpace(lines[i])
-		if !strings.HasPrefix(line, "#EXT-X-STREAM-INF:") {
-			continue
-		}
-		match := playbackHLSResolution.FindStringSubmatch(strings.TrimPrefix(line, "#EXT-X-STREAM-INF:"))
-		if len(match) != 3 {
-			continue
-		}
-		width, _ := strconv.Atoi(match[1])
-		height, _ := strconv.Atoi(match[2])
-		if width < height {
-			height = width
-		}
-		uri := strings.TrimSpace(lines[i+1])
-		if height > 0 && height <= 4320 && uri != "" && !strings.HasPrefix(uri, "#") {
-			variants = append(variants, variant{line: i, quality: height, uri: uri})
-		}
-	}
+	variants := playbackHLSVariants(media.Playlist)
 	if len(variants) == 0 {
 		return media, nil
 	}
@@ -99,14 +75,6 @@ func (downloader *Downloader) selectPlaybackQuality(ctx context.Context, media p
 		media.Variants = append(media.Variants, providerMedia{Quality: variant.quality})
 		if variant.quality == requested {
 			selected = variant
-		}
-	}
-	if watchOnlyMode() && requested == 0 {
-		selected = variants[len(variants)-1]
-		for _, variant := range variants {
-			if variant.quality <= 480 && variant.quality >= selected.quality {
-				selected = variant
-			}
 		}
 	}
 	base, err := url.Parse(media.URL)
@@ -147,4 +115,35 @@ func (downloader *Downloader) selectPlaybackQuality(ctx context.Context, media p
 		media.Duration = duration
 	}
 	return media, nil
+}
+
+type playbackHLSVariant struct {
+	line    int
+	quality int
+	uri     string
+}
+
+func playbackHLSVariants(playlist string) []playbackHLSVariant {
+	lines := strings.Split(playlist, "\n")
+	var variants []playbackHLSVariant
+	for i := 0; i+1 < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		if !strings.HasPrefix(line, "#EXT-X-STREAM-INF:") {
+			continue
+		}
+		match := playbackHLSResolution.FindStringSubmatch(strings.TrimPrefix(line, "#EXT-X-STREAM-INF:"))
+		if len(match) != 3 {
+			continue
+		}
+		width, _ := strconv.Atoi(match[1])
+		height, _ := strconv.Atoi(match[2])
+		if width < height {
+			height = width
+		}
+		uri := strings.TrimSpace(lines[i+1])
+		if height > 0 && height <= 4320 && uri != "" && !strings.HasPrefix(uri, "#") {
+			variants = append(variants, playbackHLSVariant{line: i, quality: height, uri: uri})
+		}
+	}
+	return variants
 }

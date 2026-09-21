@@ -45,7 +45,9 @@ func (a *UIApp) removeTaskLocked(id string) {
 	}
 	a.taskOrder = order
 	if task != nil && !groupRemains {
-		delete(a.merges, task.DramaID)
+		if _, _, err := a.mergedPlaybackTaskLocked(mergedPlaybackPrefix + task.DramaID); err != nil && a.mergeJobs[task.DramaID] == nil {
+			delete(a.merges, task.DramaID)
+		}
 	}
 }
 
@@ -62,11 +64,15 @@ func (a *UIApp) startDramaParse(drama Drama, updateOnly bool) {
 		a.markParsingFinished([]Drama{drama})
 		return
 	}
+	quality := 0
+	if task := a.tasks[uiTaskID(a.placeholderTask(drama, "parsing").OutPath)]; task != nil {
+		quality = task.Source.DownloadQuality
+	}
 	a.mu.Unlock()
 	go func() {
 		defer cancel()
 		defer a.markParsingFinished([]Drama{drama})
-		_, _, _ = a.enqueueDramas(ctx, []Drama{drama}, updateOnly)
+		_, _, _ = a.enqueueDramas(ctx, []Drama{drama}, updateOnly, quality)
 	}()
 }
 
@@ -147,6 +153,10 @@ func (a *UIApp) handlePause(writer http.ResponseWriter, request *http.Request) {
 		return
 	}
 	a.mu.Lock()
+	if !a.requireTaskSourcesLocked(writer, request, selection) {
+		a.mu.Unlock()
+		return
+	}
 	for _, id := range selection.idsLocked(a) {
 		task := a.tasks[id]
 		if task == nil || task.RemoveRequested || task.CancelRequested {
@@ -170,7 +180,7 @@ func (a *UIApp) handlePause(writer http.ResponseWriter, request *http.Request) {
 		task.UpdatedAt = time.Now()
 	}
 	_ = a.saveStateLocked()
-	views := a.taskViewsLocked()
+	views := a.taskViewsForSourceLocked(request.Context())
 	a.mu.Unlock()
 	writeJSON(writer, http.StatusOK, map[string]any{"data": views})
 }
@@ -185,6 +195,10 @@ func (a *UIApp) handleResume(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	a.mu.Lock()
+	if !a.requireTaskSourcesLocked(writer, request, selection) {
+		a.mu.Unlock()
+		return
+	}
 	if a.parsingInFlight == nil {
 		a.parsingInFlight = map[string]bool{}
 	}
@@ -201,7 +215,7 @@ func (a *UIApp) handleResume(writer http.ResponseWriter, request *http.Request) 
 			}
 			a.removeTaskLocked(id)
 			a.parsingInFlight[drama.ID] = true
-			a.addParsingPlaceholderTaskLocked(drama)
+			a.addParsingPlaceholderTaskLocked(drama, task.Source.DownloadQuality)
 			reparses = append(reparses, drama)
 			continue
 		}
@@ -216,7 +230,7 @@ func (a *UIApp) handleResume(writer http.ResponseWriter, request *http.Request) 
 	}
 	_ = a.saveStateLocked()
 	a.cond.Broadcast()
-	views := a.taskViewsLocked()
+	views := a.taskViewsForSourceLocked(request.Context())
 	a.mu.Unlock()
 	for _, drama := range reparses {
 		a.startDramaParse(drama, true)

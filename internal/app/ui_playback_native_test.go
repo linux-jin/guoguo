@@ -49,7 +49,7 @@ func nativeOpenFixture(t *testing.T, app *UIApp, episode int, offset float64, ve
 	request := httptest.NewRequest(http.MethodPost, "http://localhost/api/ui/playback/hls/open", strings.NewReader(fmt.Sprintf(`{"session":"fixture","episode":%d,"start":%f,"version":%d}`, episode, offset, version)))
 	request.Header.Set("Content-Type", "application/json")
 	writer := httptest.NewRecorder()
-	app.handlePlaybackNativeOpen(writer, request)
+	app.handlePlaybackNativeOpen(writer, viewerFixtureRequest(app, request))
 	if writer.Code != http.StatusOK {
 		t.Fatalf("native playback open: %d %s", writer.Code, writer.Body.String())
 	}
@@ -69,7 +69,7 @@ func TestPlaybackNativeHLSSeeksRangesPrefetchAndCleanup(t *testing.T) {
 	}
 	cache := session.native
 	writer := httptest.NewRecorder()
-	app.handlePlaybackNativeAsset(writer, httptest.NewRequest(http.MethodGet, "http://localhost"+address, nil))
+	app.handlePlaybackNativeAsset(writer, viewerFixtureRequest(app, httptest.NewRequest(http.MethodGet, "http://localhost"+address, nil)))
 	if writer.Code != http.StatusOK || strings.Count(writer.Body.String(), "#EXTINF:") != 15 || !strings.Contains(writer.Body.String(), "#EXT-X-ENDLIST") || strings.Contains(writer.Body.String(), "generated.mp4") {
 		t.Fatal("native playlist is not a complete, private VOD timeline", writer.Body.String())
 	}
@@ -80,7 +80,7 @@ func TestPlaybackNativeHLSSeeksRangesPrefetchAndCleanup(t *testing.T) {
 			request.Header.Set("Range", header)
 		}
 		result := httptest.NewRecorder()
-		app.handlePlaybackNativeAsset(result, request)
+		app.handlePlaybackNativeAsset(result, viewerFixtureRequest(app, request))
 		return result
 	}
 	first := read(0, http.MethodGet, "bytes=0-187")
@@ -113,7 +113,7 @@ func TestPlaybackNativeHLSSeeksRangesPrefetchAndCleanup(t *testing.T) {
 		t.Fatal("native playback did not reuse the prepared next episode")
 	}
 	writer = httptest.NewRecorder()
-	app.handlePlaybackNativeAsset(writer, httptest.NewRequest(http.MethodGet, "http://localhost"+address, nil))
+	app.handlePlaybackNativeAsset(writer, viewerFixtureRequest(app, httptest.NewRequest(http.MethodGet, "http://localhost"+address, nil)))
 	if writer.Code != http.StatusGone || cache.ctx.Err() == nil {
 		t.Fatal("previous HLS run stayed active after switching episodes")
 	}
@@ -139,7 +139,7 @@ func TestPlaybackNativeHLSSeeksRangesPrefetchAndCleanup(t *testing.T) {
 func TestPlaybackKeeps1080pAndNativeResumeTimeline(t *testing.T) {
 	app, session := nativePlaybackFixture(t, "4", "1080x1920")
 	writer := httptest.NewRecorder()
-	app.handlePlaybackStream(writer, httptest.NewRequest(http.MethodGet, "http://localhost/api/ui/playback/stream?session=fixture&episode=1", nil))
+	app.handlePlaybackStream(writer, viewerFixtureRequest(app, httptest.NewRequest(http.MethodGet, "http://localhost/api/ui/playback/stream?session=fixture&episode=1", nil)))
 	if writer.Code != http.StatusOK || !bytes.Contains(writer.Body.Bytes(), []byte("moof")) {
 		t.Fatal("generated 1080p stream failed", writer.Code)
 	}
@@ -159,7 +159,7 @@ func TestPlaybackKeeps1080pAndNativeResumeTimeline(t *testing.T) {
 	var address string
 	_ = json.Unmarshal(opened["url"], &address)
 	writer = httptest.NewRecorder()
-	app.handlePlaybackNativeAsset(writer, httptest.NewRequest(http.MethodGet, "http://localhost"+address, nil))
+	app.handlePlaybackNativeAsset(writer, viewerFixtureRequest(app, httptest.NewRequest(http.MethodGet, "http://localhost"+address, nil)))
 	if !strings.Contains(writer.Body.String(), "TIME-OFFSET=2.500") || strings.Count(writer.Body.String(), "#EXTINF:") != 2 || session.historyRuns[session.run].duration != 4 {
 		t.Fatal("native seek or history used a shortened timeline")
 	}
@@ -174,7 +174,7 @@ func TestPlaybackNativeDecodesAcrossBatches(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	app.registerPlaybackRoutes(mux)
-	server := httptest.NewServer(mux)
+	server := httptest.NewServer(viewerFixtureHandler(app, mux))
 	defer server.Close()
 	defer app.closePlayback("fixture")
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)

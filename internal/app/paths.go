@@ -11,21 +11,13 @@ import (
 )
 
 func portableFFmpeg(configured string) string {
-	if configured != "" && configured != "ffmpeg" && configured != "ffmpeg.exe" {
-		return configured
+	if candidates := ffmpegCandidates(configured, ffmpegManagedDirectory()); len(candidates) > 0 {
+		return candidates[0]
 	}
-	name := "ffmpeg"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
+	if automaticFFmpeg(configured) {
+		return ffmpegExecutableName()
 	}
-	for _, candidate := range []string{filepath.Join("bin", name), name, filepath.Join("bin", runtime.GOOS+"-"+runtime.GOARCH, name)} {
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			if absolute, err := filepath.Abs(candidate); err == nil {
-				return absolute
-			}
-		}
-	}
-	return name
+	return normalizedFFmpegSetting(configured)
 }
 
 func normalizedOutputDirectory(raw string) (string, error) {

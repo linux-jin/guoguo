@@ -1,9 +1,67 @@
-import { $, element, button, icon, initial, withFocus, dramaTitle, sourceKey, sourceLabel, categoryName, episodeCount, firstNonEmpty, tagsText, releaseText, setMessage } from './ui-core.js';
+import { $, element, button, icon, coverURL, withFocus, dramaTitle, sourceKey, sourceLabel, categoryName, episodeCount, firstNonEmpty, tagsText, releaseText, setMessage } from './ui-core.js';
+import { retryCoverURL } from './cover-retry.js';
 
 export function createDetails(app) {
   let currentID = '';
+  const metadataMessages = new Map();
+  let poster;
+  const exporting = new Set();
   const panel = $('detailPanel');
   const content = $('detailContent');
+
+  function renderCover(drama) {
+    const address = coverURL(drama), title = dramaTitle(drama);
+    if (poster?.id === drama.id && poster.address === address) {
+      if (poster.image) poster.image.alt = title + ' 海报';
+      return poster.node;
+    }
+    const node = element('div', 'detail-cover');
+    const status = element('span', 'detail-cover-status', address ? '加载海报…' : '暂无海报');
+    status.setAttribute('role', 'status');
+    node.appendChild(status);
+    const current = {id: drama.id, address, node, failed: false};
+    poster = current;
+    if (!address) return node;
+    const image = element('img');
+    current.image = image;
+    image.alt = title + ' 海报';
+    image.decoding = 'async';
+    image.hidden = true;
+    image.addEventListener('load', () => {
+      if (poster !== current) return;
+      current.failed = false;
+      image.hidden = false;
+      status.hidden = true;
+      app.library.coverLoaded(drama.id, address);
+    });
+    image.addEventListener('error', () => {
+      if (poster !== current) return;
+      current.failed = true;
+      image.hidden = true;
+      status.hidden = false;
+      status.textContent = '海报加载失败';
+      app.library.coverFailed(drama.id, address);
+    });
+    current.retry = () => {
+      if (!current.failed) return;
+      current.failed = false;
+      status.textContent = '加载海报…';
+      image.src = retryCoverURL(address);
+    };
+    node.appendChild(image);
+    image.src = address;
+    return node;
+  }
+
+  function refreshCover(id, retry = false) {
+    if (!panel.open || currentID !== id) return;
+    const drama = app.library.get(id);
+    if (!drama) return;
+    const previous = poster?.node;
+    const next = renderCover(drama);
+    if (previous !== next) previous?.replaceWith(next);
+    if (retry) poster?.retry?.();
+  }
 
   function render() {
     if (!currentID) return;
@@ -15,17 +73,22 @@ export function createDetails(app) {
     withFocus(content, () => {
       content.replaceChildren();
       const top = element('div', 'detail-top');
-      const identity = element('div', 'detail-initial', initial(title));
-      identity.setAttribute('aria-hidden', 'true');
       const heading = element('div', 'spacer');
       const name = element('h1', '', title);
       name.id = 'detailTitle';
       heading.append(name, element('p', 'detail-meta', sourceLabel(sourceKey(drama)) + ' · ' + categoryName(drama)));
       const tags = element('div', 'tags detail-tags');
       tagsText(drama).slice(0, 10).forEach(tag => tags.appendChild(element('span', 'tag', tag)));
+      if (drama.vip === true) tags.prepend(element('span', 'tag vip-tag', 'VIP · 仅试看'));
       heading.appendChild(tags);
-      top.append(identity, heading);
+      top.append(renderCover(drama), heading);
       content.appendChild(top);
+      const metadataStatus = element('p', 'small', metadataMessages.get(currentID) || '');
+      metadataStatus.id = 'detailMetadataStatus';
+      metadataStatus.setAttribute('role', 'status');
+      metadataStatus.hidden = !metadataStatus.textContent;
+      content.appendChild(metadataStatus);
+      if (drama.vip === true) content.appendChild(element('p', 'notice vip-notice', '此剧含 VIP 分集，站源仅提供试看；试看内容不会作为完整分集下载。'));
       if (history) content.appendChild(element('p', 'detail-progress', window.JukuHistory.progressText(history)));
       if (saved?.newEpisodes > 0) content.appendChild(element('p', 'following-update notice', '剧库新增 ' + saved.newEpisodes + ' 集'));
       const actions = element('div', 'detail-actions');
@@ -56,17 +119,49 @@ export function createDetails(app) {
       const watched = button(saved?.completed ? '取消已看标记' : '标为已看', () => app.following.setCompleted(currentID, !saved?.completed), app.following.busy(currentID), 'secondary');
       watched.id = 'detailCompletedBtn';
       watched.dataset.focusKey = 'detail-completed';
-      secondary.append(download, watched);
+      const emby = button(exporting.has(currentID) ? '导出中…' : '导出 Emby', () => exportEmby(currentID, title), !known || exporting.has(currentID), 'secondary');
+      emby.id = 'detailEmbyBtn';
+      emby.dataset.focusKey = 'detail-emby';
+      emby.title = '导出 STRM 分集文件，用于现有 Emby 电视剧媒体库';
+      if (app.viewer?.onlineOnly) secondary.appendChild(watched);
+      else secondary.append(app.downloads.qualityControl(), download, watched, emby);
       actions.after(secondary);
       content.appendChild(element('p', 'small notice', '手动标记用于整理清单，实际播放进度仍自动保存。'));
     });
+  }
+
+  async function exportEmby(id, title) {
+    if (exporting.has(id)) return;
+    exporting.add(id);
+    render();
+    try {
+      const response = await fetch('/api/emby/export', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({dramaId: id, baseUrl: location.origin})});
+      if (!response.ok) {const result = await response.json(); throw new Error(result.error || '导出失败');}
+      const address = URL.createObjectURL(await response.blob());
+      const link = document.createElement('a');
+      link.href = address;
+      link.download = title + '-Emby.zip';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(address), 60000);
+      setMessage('已导出 Emby 分集；解压到 Emby 电视剧媒体库后扫描即可。');
+    } catch (error) {setMessage('Emby 导出失败：' + error.message, true);}
+    finally {exporting.delete(id); if (panel.open && currentID === id) render();}
   }
 
   function open(id) {
     currentID = id;
     render();
     window.JukuDialogs.open(panel);
+    app.library.refreshDrama(id);
   }
 
-  return {open, refresh: () => {if (panel.open) render();}};
+  function metadataStatus(id, text) {
+    metadataMessages.set(id, text);
+    const status = $('detailMetadataStatus');
+    if (panel.open && currentID === id && status) {status.textContent = text; status.hidden = !text;}
+  }
+
+  return {open, metadataStatus, refreshCover, retryCover: () => refreshCover(currentID, true), refresh: () => {if (panel.open) render();}};
 }

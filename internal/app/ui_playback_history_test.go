@@ -21,11 +21,12 @@ const historyFixtureDramaID = "hongguo:7000000000000000001"
 func historyFixtureApp(t *testing.T) (*UIApp, *playbackSession) {
 	t.Helper()
 	app := &UIApp{cfg: Config{dataDir: t.TempDir()}, playbacks: make(map[string]*playbackSession)}
-	session := &playbackSession{id: "history-fixture", openedAt: time.Now().Add(-time.Minute), run: 1, currentIndex: 1, state: "ended", expires: time.Now().Add(time.Hour), historyRuns: map[uint64]playbackHistoryRun{1: {episode: 1, duration: 90}}}
+	session := &playbackSession{id: "history-fixture", viewer: fixtureViewer(app), openedAt: time.Now().Add(-time.Minute), run: 1, currentIndex: 1, state: "ended", expires: time.Now().Add(time.Hour), historyRuns: map[uint64]playbackHistoryRun{1: {episode: 1, duration: 90}}}
 	for index := 1; index <= 3; index++ {
 		session.tasks = append(session.tasks, Task{DramaID: historyFixtureDramaID, DramaTitle: "本地无图续播测试", Index: index, Total: 3, Chapter: Chapter{ID: fmt.Sprintf("hongguo:7000000000000000001:%d", index), CurrentEpisode: rawEpisode(index)}})
 	}
 	session.timer = time.AfterFunc(time.Hour, func() {})
+	session.viewer.retain()
 	app.playbacks[session.id] = session
 	t.Cleanup(app.closePlaybacks)
 	return app, session
@@ -35,7 +36,7 @@ func historyProgress(sequence uint64, position float64) playbackHistoryProgress 
 	return playbackHistoryProgress{Run: 1, Sequence: sequence, Episode: 1, Position: position, Duration: 90}
 }
 
-func historyJSONRequest(t *testing.T, handler http.HandlerFunc, path string, input any) *httptest.ResponseRecorder {
+func historyJSONRequest(t *testing.T, app *UIApp, handler http.HandlerFunc, path string, input any) *httptest.ResponseRecorder {
 	t.Helper()
 	body, err := json.Marshal(input)
 	if err != nil {
@@ -44,22 +45,22 @@ func historyJSONRequest(t *testing.T, handler http.HandlerFunc, path string, inp
 	request := httptest.NewRequest(http.MethodPost, "http://localhost"+path, bytes.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	writer := httptest.NewRecorder()
-	handler(writer, request)
+	handler(writer, viewerFixtureRequest(app, request))
 	return writer
 }
 
 func TestPlaybackHistoryPersistsAndSharesOnlineCollectionProgress(t *testing.T) {
 	app, session := historyFixtureApp(t)
-	if _, saved, err := app.recordPlaybackProgress(session.id, historyProgress(1, 23.75)); err != nil || !saved {
+	if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, historyProgress(1, 23.75)); err != nil || !saved {
 		t.Fatal("initial progress was not saved", saved, err)
 	}
 	app.playbackMu.Lock()
 	session.downloadIDs = []string{"download-one", "download-two", "download-three"}
 	app.playbackMu.Unlock()
-	if _, saved, err := app.recordPlaybackProgress(session.id, historyProgress(2, 41.25)); err != nil || !saved {
+	if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, historyProgress(2, 41.25)); err != nil || !saved {
 		t.Fatal("collection progress was not saved", saved, err)
 	}
-	restarted := newPlaybackHistoryStore(app.cfg.dataDirectory())
+	restarted := newPlaybackHistoryStore(fixtureViewer(app).directory)
 	entries, err := restarted.list()
 	if err != nil || len(entries) != 1 || entries[0].Position != 41.25 || entries[0].Mode != "collection" || entries[0].TaskID != "download-one" || entries[0].DramaID != historyFixtureDramaID {
 		t.Fatalf("restart lost or duplicated progress: %+v %v", entries, err)
@@ -80,13 +81,13 @@ func TestPlaybackHistoryRejectsPrefetchAndOutOfOrderProgress(t *testing.T) {
 	app, session := historyFixtureApp(t)
 	preloaded := historyProgress(1, 30)
 	preloaded.Episode = 2
-	if _, saved, err := app.recordPlaybackProgress(session.id, preloaded); err != nil || saved {
+	if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, preloaded); err != nil || saved {
 		t.Fatal("an unplayed episode became history", saved, err)
 	}
-	if _, err := os.Stat(app.playbackHistory().path); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(fixtureViewer(app).playbackHistory().path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("prefetch created a history file", err)
 	}
-	if _, saved, err := app.recordPlaybackProgress(session.id, historyProgress(1, 45)); err != nil || !saved {
+	if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, historyProgress(1, 45)); err != nil || !saved {
 		t.Fatal(saved, err)
 	}
 	app.playbackMu.Lock()
@@ -95,13 +96,13 @@ func TestPlaybackHistoryRejectsPrefetchAndOutOfOrderProgress(t *testing.T) {
 	app.playbackMu.Unlock()
 	next := historyProgress(3, 12)
 	next.Run, next.Episode = 2, 2
-	if _, saved, err := app.recordPlaybackProgress(session.id, next); err != nil || !saved {
+	if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, next); err != nil || !saved {
 		t.Fatal(saved, err)
 	}
-	if _, saved, err := app.recordPlaybackProgress(session.id, historyProgress(2, 80)); err != nil || saved {
+	if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, historyProgress(2, 80)); err != nil || saved {
 		t.Fatal("late previous-episode report overwrote progress", saved, err)
 	}
-	entry, _ := app.playbackHistory().get(historyFixtureDramaID)
+	entry, _ := fixtureViewer(app).playbackHistory().get(historyFixtureDramaID)
 	if entry.Episode != "2" || entry.Position != 12 {
 		t.Fatalf("latest episode was not kept: %+v", entry)
 	}
@@ -109,14 +110,14 @@ func TestPlaybackHistoryRejectsPrefetchAndOutOfOrderProgress(t *testing.T) {
 
 func TestPlaybackHistoryCloseSavesBeforeSessionRelease(t *testing.T) {
 	app, session := historyFixtureApp(t)
-	writer := historyJSONRequest(t, app.handlePlaybackControl, "/api/ui/playback/control", map[string]any{"session": session.id, "action": "close", "progress": historyProgress(1, 63.125)})
+	writer := historyJSONRequest(t, app, app.handlePlaybackControl, "/api/ui/playback/control", map[string]any{"session": session.id, "action": "close", "progress": historyProgress(1, 63.125)})
 	if writer.Code != 200 || strings.Contains(writer.Body.String(), `"historyError":"观看`) {
 		t.Fatal(writer.Code, writer.Body.String())
 	}
 	if _, exists := app.playbackStatus(session.id, false); exists {
 		t.Fatal("closing history retained the playback session")
 	}
-	entry, found := newPlaybackHistoryStore(app.cfg.dataDirectory()).get(historyFixtureDramaID)
+	entry, found := newPlaybackHistoryStore(fixtureViewer(app).directory).get(historyFixtureDramaID)
 	if !found || entry.Position != 63.125 {
 		t.Fatalf("close snapshot was lost: %+v", entry)
 	}
@@ -126,27 +127,27 @@ func TestPlaybackHistoryDeleteAndClearBlockLateAutosaves(t *testing.T) {
 	for _, all := range []bool{false, true} {
 		t.Run(fmt.Sprint(all), func(t *testing.T) {
 			app, session := historyFixtureApp(t)
-			if _, _, err := app.recordPlaybackProgress(session.id, historyProgress(1, 20)); err != nil {
+			if _, _, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, historyProgress(1, 20)); err != nil {
 				t.Fatal(err)
 			}
 			input := map[string]any{"dramaId": historyFixtureDramaID}
 			if all {
 				input = map[string]any{"all": true}
 			}
-			writer := historyJSONRequest(t, app.handlePlaybackHistoryRemove, "/api/ui/playback/history/remove", input)
+			writer := historyJSONRequest(t, app, app.handlePlaybackHistoryRemove, "/api/ui/playback/history/remove", input)
 			if writer.Code != 200 {
 				t.Fatal(writer.Body.String())
 			}
-			if _, saved, err := app.recordPlaybackProgress(session.id, historyProgress(2, 25)); err != nil || saved {
+			if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, historyProgress(2, 25)); err != nil || saved {
 				t.Fatal("deleted history was resurrected", saved, err)
 			}
-			if entries, _ := newPlaybackHistoryStore(app.cfg.dataDirectory()).list(); len(entries) != 0 {
+			if entries, _ := newPlaybackHistoryStore(fixtureViewer(app).directory).list(); len(entries) != 0 {
 				t.Fatal("deleted history was persisted again")
 			}
 			app.playbackMu.Lock()
 			session.openedAt = time.Now().Add(time.Millisecond)
 			app.playbackMu.Unlock()
-			if _, saved, err := app.recordPlaybackProgress(session.id, historyProgress(3, 5)); err != nil || !saved {
+			if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, historyProgress(3, 5)); err != nil || !saved {
 				t.Fatal("explicit new viewing could not create history", saved, err)
 			}
 		})
@@ -157,14 +158,15 @@ func TestPlaybackHistoryNewSessionWinsOverLateOldClose(t *testing.T) {
 	app, old := historyFixtureApp(t)
 	newer := *old
 	newer.id, newer.openedAt, newer.timer = "new-viewing", time.Now(), time.AfterFunc(time.Hour, func() {})
+	newer.viewer.retain()
 	app.playbacks[newer.id] = &newer
-	if _, saved, err := app.recordPlaybackProgress(newer.id, historyProgress(1, 8)); err != nil || !saved {
+	if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), newer.id, historyProgress(1, 8)); err != nil || !saved {
 		t.Fatal(saved, err)
 	}
-	if _, saved, err := app.recordPlaybackProgress(old.id, historyProgress(8, 60)); err != nil || saved {
+	if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), old.id, historyProgress(8, 60)); err != nil || saved {
 		t.Fatal("older window replaced the new viewing", saved, err)
 	}
-	entry, _ := app.playbackHistory().get(historyFixtureDramaID)
+	entry, _ := fixtureViewer(app).playbackHistory().get(historyFixtureDramaID)
 	if entry.Position != 8 {
 		t.Fatal(entry)
 	}
@@ -206,10 +208,13 @@ func TestPlaybackHistoryResumeUsesChapterIdentityAndActualCompletion(t *testing.
 
 func TestPlaybackHistoryStorageDoesNotHoldPlaybackLock(t *testing.T) {
 	app, session := historyFixtureApp(t)
-	store := app.playbackHistory()
+	store := fixtureViewer(app).playbackHistory()
 	store.writeMu.Lock()
 	done := make(chan error, 1)
-	go func() { _, _, err := app.recordPlaybackProgress(session.id, historyProgress(1, 10)); done <- err }()
+	go func() {
+		_, _, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, historyProgress(1, 10))
+		done <- err
+	}()
 	deadline := time.After(time.Second)
 	for {
 		if _, exists := store.get(historyFixtureDramaID); exists {
@@ -240,24 +245,24 @@ func TestPlaybackHistoryStorageDoesNotHoldPlaybackLock(t *testing.T) {
 
 func TestPlaybackHistoryWriteFailureAndCorruptFilePreservation(t *testing.T) {
 	app, session := historyFixtureApp(t)
-	store := app.playbackHistory()
+	store := fixtureViewer(app).playbackHistory()
 	originalPath := store.path
 	store.path = app.cfg.dataDirectory()
-	if _, saved, err := app.recordPlaybackProgress(session.id, historyProgress(1, 12)); err == nil || saved {
+	if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, historyProgress(1, 12)); err == nil || saved {
 		t.Fatal("storage failure was silently reported as saved", saved, err)
 	}
 	if _, exists := app.playbackStatus(session.id, false); !exists {
 		t.Fatal("history storage failure ended playback")
 	}
 	store.path = originalPath
-	if _, saved, err := app.recordPlaybackProgress(session.id, historyProgress(2, 12)); err != nil || !saved {
+	if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, historyProgress(2, 12)); err != nil || !saved {
 		t.Fatal("failed write could not be retried", saved, err)
 	}
 	broken := []byte(`{"version":1,"entries":`)
 	if err := os.WriteFile(originalPath, broken, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	restarted := newPlaybackHistoryStore(app.cfg.dataDirectory())
+	restarted := newPlaybackHistoryStore(fixtureViewer(app).directory)
 	if _, err := restarted.list(); err == nil {
 		t.Fatal("corrupt history was reported as an empty success")
 	}
@@ -314,18 +319,18 @@ func TestPlaybackHistoryRejectsCrossSiteAndInvalidProgress(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "http://localhost/api/ui/playback/history", nil)
 	request.Header.Set("Origin", "https://unrelated.invalid")
 	writer := httptest.NewRecorder()
-	app.handlePlaybackHistory(writer, request)
+	app.handlePlaybackHistory(writer, viewerFixtureRequest(app, request))
 	if writer.Code != http.StatusForbidden {
 		t.Fatal("cross-site history was allowed", writer.Code)
 	}
 	for _, position := range []float64{-1, 91 * 60 * 60} {
-		if _, saved, err := app.recordPlaybackProgress(session.id, historyProgress(1, position)); err == nil || saved {
+		if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, historyProgress(1, position)); err == nil || saved {
 			t.Fatal("invalid position", position, saved, err)
 		}
 	}
 	progress := historyProgress(1, 20)
 	progress.Completed = true
-	if entry, saved, err := app.recordPlaybackProgress(session.id, progress); err != nil || !saved || entry.Completed {
+	if entry, saved, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, progress); err != nil || !saved || entry.Completed {
 		t.Fatal("early completion flag skipped content", entry.Completed, saved, err)
 	}
 }
@@ -355,15 +360,15 @@ func TestPlaybackHistoryOpenResumesAndHonorsExplicitEpisode(t *testing.T) {
 	session.historyRuns[2] = playbackHistoryRun{episode: 2, duration: 90}
 	progress := historyProgress(1, 32.5)
 	progress.Episode, progress.Run = 2, 2
-	if _, saved, err := app.recordPlaybackProgress(session.id, progress); err != nil || !saved {
+	if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, progress); err != nil || !saved {
 		t.Fatal(saved, err)
 	}
 	app.closePlayback(session.id)
-	app.history = nil
-	app.historyOnce = sync.Once{}
+	fixtureViewer(app).history = nil
+	fixtureViewer(app).historyOnce = sync.Once{}
 	check := func(input map[string]any, index int, position float64, mode string) {
 		t.Helper()
-		writer := historyJSONRequest(t, app.handlePlaybackOpen, "/api/ui/playback/open", input)
+		writer := historyJSONRequest(t, app, app.handlePlaybackOpen, "/api/ui/playback/open", input)
 		if writer.Code != 200 {
 			t.Fatal(writer.Code, writer.Body.String())
 		}
@@ -385,9 +390,9 @@ func TestPlaybackHistoryOpenResumesAndHonorsExplicitEpisode(t *testing.T) {
 	check(map[string]any{"dramaId": historyFixtureDramaID, "resume": true, "fromHistory": true}, 2, 32.5, "online")
 	check(map[string]any{"taskId": "download-1", "resume": true}, 2, 32.5, "collection")
 	check(map[string]any{"taskId": "download-3", "resume": false}, 3, 0, "collection")
-	entry, _ := app.playbackHistory().get(historyFixtureDramaID)
+	entry, _ := fixtureViewer(app).playbackHistory().get(historyFixtureDramaID)
 	entry.Mode, entry.TaskID, entry.Completed, entry.Position = "collection", "download-2", true, 90
-	if _, err := app.playbackHistory().record(entry, time.Now()); err != nil {
+	if _, err := fixtureViewer(app).playbackHistory().record(entry, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	check(map[string]any{"dramaId": historyFixtureDramaID, "resume": true, "fromHistory": true}, 3, 0, "collection")

@@ -14,12 +14,14 @@ import (
 	"time"
 )
 
-const playbackIdleTimeout = 2 * time.Minute
-const playbackSessionLimit = 4
+const playbackIdleTimeout = 10 * time.Minute
 const playbackMIME = `video/mp4; codecs="avc1.42C01F, mp4a.40.2"`
 
 type playbackSession struct {
+	accountID       string
+	dramaID         string
 	id              string
+	viewer          *viewerRecords
 	tasks           []Task
 	downloadIDs     []string
 	prepared        map[int]bool
@@ -34,6 +36,14 @@ type playbackSession struct {
 	prefetchVersion uint64
 	prefetch        *playbackPrefetch
 	native          *playbackNative
+	media           *playbackMediaSession
+	mediaReady      chan struct{}
+	mediaError      error
+	mediaWaiters    int
+	emby            bool
+	embyLegacy      bool
+	embyForceProxy  bool
+	embyProcessing  string
 	quality         int
 	streamVersion   uint64
 	openedAt        time.Time
@@ -42,6 +52,8 @@ type playbackSession struct {
 }
 
 type playbackEpisode struct {
+	Merged    bool   `json:"merged,omitempty"`
+	VIP       bool   `json:"vip,omitempty"`
 	Index     int    `json:"index"`
 	Episode   string `json:"episode"`
 	Title     string `json:"title"`
@@ -53,14 +65,21 @@ type playbackEpisode struct {
 }
 
 type playbackView struct {
-	State    string                `json:"state"`
-	Error    string                `json:"error,omitempty"`
-	Run      uint64                `json:"run"`
-	Duration float64               `json:"duration"`
-	Prefetch *playbackPrefetchView `json:"prefetch,omitempty"`
+	State        string                `json:"state"`
+	Error        string                `json:"error,omitempty"`
+	Run          uint64                `json:"run"`
+	Duration     float64               `json:"duration"`
+	Prefetch     *playbackPrefetchView `json:"prefetch,omitempty"`
+	Plan         *playbackMediaPlan    `json:"plan,omitempty"`
+	MediaBytes   int64                 `json:"mediaBytes,omitempty"`
+	MediaFailure bool                  `json:"mediaFailure,omitempty"`
 }
 
 func (app *UIApp) registerPlaybackRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/ui/admin/playback", app.handlePlaybackSettings)
+	mux.HandleFunc("/api/ui/playback/plan", app.handlePlaybackPlan)
+	mux.HandleFunc("/api/ui/playback/media/", app.handlePlaybackMediaAsset)
+	mux.HandleFunc("/api/emby/media/", app.handleEmbyMediaAsset)
 	mux.HandleFunc("/api/ui/playback/open", app.handlePlaybackOpen)
 	mux.HandleFunc("/api/ui/playback/prepare", app.handlePlaybackPrepare)
 	mux.HandleFunc("/api/ui/playback/stream", app.handlePlaybackStream)
@@ -77,7 +96,8 @@ func (app *UIApp) registerPlaybackRoutes(mux *http.ServeMux) {
 }
 
 func playbackRequestAllowed(writer http.ResponseWriter, request *http.Request, method string) bool {
-	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Cache-Control", "private, no-store, no-transform")
+	writer.Header().Set("X-Accel-Buffering", "no")
 	writer.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
 	if request.Method != method {
@@ -85,18 +105,30 @@ func playbackRequestAllowed(writer http.ResponseWriter, request *http.Request, m
 		writeJSON(writer, http.StatusMethodNotAllowed, map[string]string{"error": "请求方法不支持"})
 		return false
 	}
-	if site := request.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
+	switch request.Header.Get("Sec-Fetch-Site") {
+	case "same-origin", "none":
+		return true
+	case "":
+	default:
 		writeJSON(writer, http.StatusForbidden, map[string]string{"error": "请从剧库页面发起播放"})
 		return false
 	}
 	if origin := request.Header.Get("Origin"); origin != "" {
 		parsed, err := url.Parse(origin)
-		if err != nil || parsed.User != nil || parsed.Scheme != "http" && parsed.Scheme != "https" || !strings.EqualFold(parsed.Host, request.Host) {
+		if err != nil || parsed.User != nil || parsed.Scheme != "http" && parsed.Scheme != "https" || !originHostMatches(parsed, request.Host) {
 			writeJSON(writer, http.StatusForbidden, map[string]string{"error": "不允许跨站播放请求"})
 			return false
 		}
 	}
 	return true
+}
+
+func originHostMatches(origin *url.URL, host string) bool {
+	port := ":80"
+	if origin.Scheme == "https" {
+		port = ":443"
+	}
+	return strings.EqualFold(strings.TrimSuffix(origin.Host, port), strings.TrimSuffix(host, port))
 }
 
 func readPlaybackRequest(writer http.ResponseWriter, request *http.Request, destination any) bool {
@@ -131,12 +163,22 @@ func (app *UIApp) handlePlaybackOpen(writer http.ResponseWriter, request *http.R
 	if !readPlaybackRequest(writer, request, &input) {
 		return
 	}
+	if input.TaskID != "" && !requireDownload(writer, request) {
+		return
+	}
 	if input.TaskID != "" && input.DramaID != "" {
 		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "请选择剧库播放或合集播放"})
 		return
 	}
+	viewer := requestViewer(writer, request)
+	if viewer == nil {
+		return
+	}
+	if input.DramaID != "" && !app.requireDramaSources(writer, request, []string{input.DramaID}) {
+		return
+	}
 	openedAt := time.Now()
-	history := app.playbackHistory()
+	history := viewer.playbackHistory()
 	previous, hasPrevious := history.get(input.DramaID)
 	if input.FromHistory && (!input.Resume || !hasPrevious || input.TaskID != "") {
 		writeJSON(writer, http.StatusNotFound, map[string]string{"error": "此观看记录已移除，请从剧库重新选择"})
@@ -149,21 +191,32 @@ func (app *UIApp) handlePlaybackOpen(writer http.ResponseWriter, request *http.R
 	initialIndex := 1
 	var collectionErr error
 	app.mu.Lock()
-	if input.FromHistory && previous.Mode == "collection" {
-		candidate := app.tasks[previous.TaskID]
-		if isPlayableDownloadTask(candidate) && candidate.DramaID == previous.DramaID {
-			input.TaskID = candidate.ID
-		} else {
-			for _, taskID := range app.taskOrder {
-				candidate = app.tasks[taskID]
-				if isPlayableDownloadTask(candidate) && candidate.DramaID == previous.DramaID {
-					input.TaskID = candidate.ID
-					break
+	if input.FromHistory && previous.Mode == "collection" && downloadAllowed(request.Context()) {
+		if strings.HasPrefix(previous.TaskID, mergedPlaybackPrefix) && previous.TaskID == mergedPlaybackPrefix+previous.DramaID {
+			if _, _, err := app.mergedPlaybackTaskLocked(previous.TaskID); err == nil {
+				input.TaskID = previous.TaskID
+			}
+		}
+		if input.TaskID == "" {
+			candidate := app.tasks[previous.TaskID]
+			if isPlayableDownloadTask(candidate) && candidate.DramaID == previous.DramaID {
+				input.TaskID = candidate.ID
+			} else {
+				for _, taskID := range app.taskOrder {
+					candidate = app.tasks[taskID]
+					if isPlayableDownloadTask(candidate) && candidate.DramaID == previous.DramaID {
+						input.TaskID = candidate.ID
+						break
+					}
 				}
 			}
 		}
 	}
 	if input.TaskID != "" {
+		if !app.requireTaskSourcesLocked(writer, request, taskSelection{IDs: []string{input.TaskID}}) {
+			app.mu.Unlock()
+			return
+		}
 		title, tasks, downloadIDs, initialIndex, collectionErr = app.collectionPlaybackTasksLocked(input.TaskID)
 	} else {
 		for _, candidate := range app.dramas {
@@ -188,9 +241,19 @@ func (app *UIApp) handlePlaybackOpen(writer http.ResponseWriter, request *http.R
 		writeJSON(writer, http.StatusNotFound, map[string]string{"error": "此短剧不在当前剧库中，请刷新剧库后重试"})
 		return
 	}
-	if _, err := app.downloader.ensureFFmpeg(request.Context()); err != nil {
-		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": app.redactError(err)})
+	if drama.ID != "" && !dramaAllowed(request.Context(), drama.ID, drama.Source) {
+		writeSourceDenied(writer)
 		return
+	}
+	for _, task := range tasks {
+		if !taskSourceAllowed(request.Context(), task) {
+			writeSourceDenied(writer)
+			return
+		}
+	}
+	sessionDramaID := drama.ID
+	if len(tasks) > 0 {
+		sessionDramaID = tasks[0].DramaID
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 90*time.Second)
 	defer cancel()
@@ -200,15 +263,16 @@ func (app *UIApp) handlePlaybackOpen(writer http.ResponseWriter, request *http.R
 		return
 	}
 	app.playbackMu.Lock()
-	if len(app.playbacks) >= playbackSessionLimit {
+	if app.activePlaybackSessionsLocked() >= app.mediaResources().snapshot().MaxSessions {
 		app.playbackMu.Unlock()
-		writeJSON(writer, http.StatusTooManyRequests, map[string]string{"error": "播放窗口过多，请先关闭其他播放窗口"})
+		writeJSON(writer, http.StatusTooManyRequests, map[string]string{"error": "同时播放数量已达上限，请稍后再试"})
 		return
 	}
 	if app.playbacks == nil {
 		app.playbacks = make(map[string]*playbackSession)
 	}
-	session := &playbackSession{id: id, expires: time.Now().Add(playbackIdleTimeout), state: "opening", cancel: cancel, openedAt: openedAt, historyRuns: make(map[uint64]playbackHistoryRun)}
+	session := &playbackSession{downloadIDs: downloadIDs, dramaID: sessionDramaID, id: id, viewer: viewer, expires: time.Now().Add(playbackIdleTimeout), state: "opening", cancel: cancel, openedAt: openedAt, historyRuns: make(map[uint64]playbackHistoryRun)}
+	viewer.retain()
 	app.playbacks[id] = session
 	session.timer = time.AfterFunc(playbackIdleTimeout, func() { app.expirePlayback(id) })
 	app.playbackMu.Unlock()
@@ -232,6 +296,12 @@ func (app *UIApp) handlePlaybackOpen(writer http.ResponseWriter, request *http.R
 			tasks = append(tasks, Task{DramaID: drama.ID, DramaTitle: title, Chapter: chapter, Index: index + 1, Total: len(chapters)})
 		}
 	}
+	for _, task := range tasks {
+		if !taskSourceAllowed(request.Context(), task) {
+			writeSourceDenied(writer)
+			return
+		}
+	}
 	episodes := make([]playbackEpisode, 0, len(tasks))
 	for index, task := range tasks {
 		number := task.Index
@@ -245,10 +315,14 @@ func (app *UIApp) handlePlaybackOpen(writer http.ResponseWriter, request *http.R
 		if total < number {
 			total = number
 		}
-		episode := playbackEpisode{Index: index + 1, Episode: task.Chapter.EpisodeString(number), Title: task.Chapter.Title, ChapterID: task.Chapter.ID, Number: number, Total: total}
+		episode := playbackEpisode{VIP: task.Chapter.VIP, Index: index + 1, Episode: task.Chapter.EpisodeString(number), Title: task.Chapter.Title, ChapterID: task.Chapter.ID, Number: number, Total: total}
 		_, _, episode.Danmaku = hongguoPlaybackIDs(task)
 		if len(downloadIDs) > 0 {
 			episode.TaskID = downloadIDs[index]
+			episode.Merged = strings.HasPrefix(episode.TaskID, mergedPlaybackPrefix)
+			if episode.Merged {
+				episode.Danmaku = false
+			}
 		}
 		episodes = append(episodes, episode)
 	}
@@ -276,12 +350,14 @@ func (app *UIApp) handlePlaybackOpen(writer http.ResponseWriter, request *http.R
 		initialIndex, initialPosition, resumePaused, resumeMessage = playbackHistoryResume(previous, tasks, initialIndex)
 	}
 	dramaID, source, _ := playbackHistoryIdentity(tasks[0].DramaID)
-	writeJSON(writer, http.StatusOK, map[string]any{"session": id, "dramaId": dramaID, "source": source, "title": title, "episodes": episodes, "mimeType": playbackMIME, "mode": mode, "initialIndex": initialIndex, "initialPosition": initialPosition, "resumePaused": resumePaused, "resumeMessage": resumeMessage})
+	writeJSON(writer, http.StatusOK, map[string]any{"session": id, "dramaId": dramaID, "source": source, "title": title, "releaseStatus": dramaReleaseStatus(drama), "vip": drama.VIP, "episodes": episodes, "mimeType": playbackMIME, "mode": mode, "initialIndex": initialIndex, "initialPosition": initialPosition, "resumePaused": resumePaused, "resumeMessage": resumeMessage})
 }
 
 func (app *UIApp) touchPlaybackLocked(session *playbackSession) {
 	session.expires = time.Now().Add(playbackIdleTimeout)
-	session.timer.Reset(playbackIdleTimeout)
+	if session.timer != nil {
+		session.timer.Reset(playbackIdleTimeout)
+	}
 }
 
 func (app *UIApp) expirePlayback(id string) {
@@ -302,6 +378,9 @@ func (app *UIApp) expirePlayback(id string) {
 	if session != nil && session.prefetch != nil {
 		session.prefetch.cancel()
 	}
+	if session != nil {
+		session.viewer.release()
+	}
 }
 
 func (app *UIApp) closePlayback(id string) {
@@ -318,6 +397,9 @@ func (app *UIApp) closePlayback(id string) {
 	if session != nil && session.prefetch != nil {
 		session.prefetch.cancel()
 	}
+	if session != nil {
+		session.viewer.release()
+	}
 }
 
 func (app *UIApp) closePlaybacks() {
@@ -329,6 +411,7 @@ func (app *UIApp) closePlaybacks() {
 	}
 	app.playbackMu.Unlock()
 	for _, session := range sessions {
+		session.viewer.release()
 		if session.cancel != nil {
 			session.cancel()
 		}
@@ -356,6 +439,12 @@ func (app *UIApp) playbackStatus(id string, touch bool) (playbackView, bool) {
 			view.Error = app.redactError(err)
 		}
 	}
+	if session.media != nil {
+		plan := session.media.plan
+		view.Plan = &plan
+		view.MediaBytes = session.media.bytes.Load()
+		view.MediaFailure = session.media.failed.Load() || session.media.proxy != nil && session.media.proxy.Err() != nil
+	}
 	if session.prefetch != nil {
 		view.Prefetch = session.prefetch.view()
 	}
@@ -371,10 +460,13 @@ func (app *UIApp) handlePlaybackControl(writer http.ResponseWriter, request *htt
 	if !readPlaybackRequest(writer, request, &input) {
 		return
 	}
+	if !app.requirePlaybackOwner(writer, request, input.Session) {
+		return
+	}
 	if input.Action == "close" {
 		var progressError string
 		if input.Progress != nil {
-			if _, _, err := app.recordPlaybackProgress(input.Session, *input.Progress); err != nil {
+			if _, _, err := app.recordPlaybackProgress(contextViewer(request.Context()), input.Session, *input.Progress); err != nil {
 				progressError = publicError(err).Error()
 			}
 		}
@@ -395,6 +487,9 @@ func (app *UIApp) handlePlaybackControl(writer http.ResponseWriter, request *htt
 
 func (app *UIApp) handlePlaybackStatus(writer http.ResponseWriter, request *http.Request) {
 	if !playbackRequestAllowed(writer, request, http.MethodGet) {
+		return
+	}
+	if !app.requirePlaybackOwner(writer, request, request.URL.Query().Get("session")) {
 		return
 	}
 	if state, ok := app.playbackStatus(request.URL.Query().Get("session"), false); ok {
@@ -421,12 +516,14 @@ func (app *UIApp) handlePlaybackStream(writer http.ResponseWriter, request *http
 		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "清晰度或播放请求编号无效"})
 		return
 	}
-	run, status, err := app.beginPlayback(request.Context(), query.Get("session"), index, offset, quality, version, false)
+	ctx := context.WithValue(request.Context(), playbackRemuxKey{}, query.Get("remux") == "1")
+	run, status, err := app.beginPlayback(ctx, query.Get("session"), index, offset, quality, version, false)
 	if err != nil {
 		writeJSON(writer, status, map[string]string{"error": err.Error()})
 		return
 	}
 	defer run.stop()
+	writer = &playbackActivityWriter{ResponseWriter: writer, app: app, run: run}
 	startupTimer := time.AfterFunc(90*time.Second, run.cancel)
 	defer startupTimer.Stop()
 	ready := func(duration float64) {

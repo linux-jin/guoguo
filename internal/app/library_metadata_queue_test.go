@@ -153,7 +153,7 @@ func TestResumeOnlyPreviouslyQueuedMetadata(t *testing.T) {
 
 func TestPrimarySortFieldsNeedNoAdditionalInterfacesWhenComplete(t *testing.T) {
 	hongguo := hongguoDramaFromAny(map[string]any{"series_id": "7615465407347952664", "series_title": "列表剧", "series_cover": coverAddressFixture, "first_visible_time": "1773662280", "hot_score": "20019", "series_play_cnt": "0"}, "测试")
-	huangdouRow := map[string]any{"id": "target", "name": "列表剧", "issue_date": "2026-03-16", "hot_rate": "20019", "click": 0}
+	huangdouRow := map[string]any{"pay_type": "free", "id": "target", "name": "列表剧", "issue_date": "2026-03-16", "hot_rate": "20019", "click": 0}
 	huangdou := huangdouDramaFromMap(huangdouRow)
 	ranking, err := parseHuangdouRanking(map[string]any{"data": map[string]any{"list": []any{huangdouRow}}}, 1)
 	if err != nil {

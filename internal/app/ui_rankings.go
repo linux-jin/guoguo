@@ -15,7 +15,7 @@ func (a *UIApp) handleRankings(writer http.ResponseWriter, request *http.Request
 	}
 	id := request.URL.Query().Get("board")
 	if id == "" {
-		writeJSON(writer, http.StatusOK, map[string]any{"boards": rankingBoards})
+		writeJSON(writer, http.StatusOK, map[string]any{"boards": sourceRankingBoards(request.Context())})
 		return
 	}
 	board, found := findRankingBoard(id)
@@ -23,6 +23,9 @@ func (a *UIApp) handleRankings(writer http.ResponseWriter, request *http.Request
 	page, err := strconv.Atoi(pageText)
 	if !found || err != nil || page < 1 || page > 500 || board.Source == "huangguo" && page != 1 {
 		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "榜单或页码无效"})
+		return
+	}
+	if !requireSource(writer, request.Context(), board.Source) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), 40*time.Second)

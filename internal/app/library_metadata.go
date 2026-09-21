@@ -14,6 +14,7 @@ const sortMetadataBatchSize = 40
 const sortMetadataRetryDelay = 5 * time.Minute
 
 type sortMetadataState struct {
+	VIPChecked   bool      `json:"vipChecked,omitempty"`
 	Version      int       `json:"version"`
 	CheckedAt    time.Time `json:"checkedAt"`
 	Pending      bool      `json:"pending,omitempty"`
@@ -41,7 +42,7 @@ func supportsSortMetadata(drama Drama) bool {
 }
 
 func needsSortMetadata(drama Drama) bool {
-	return supportsSortMetadata(drama) && (drama.SortMetadata == nil || drama.SortMetadata.Version != dramaSortMetadataVersion(drama) || needsHongguoCoverAddress(drama))
+	return supportsSortMetadata(drama) && (drama.SortMetadata == nil || drama.SortMetadata.Version != dramaSortMetadataVersion(drama) || needsHongguoCoverAddress(drama) || needsHuangdouVIPMetadata(drama))
 }
 
 func needsHongguoCoverAddress(drama Drama) bool {
@@ -168,6 +169,7 @@ func (d *Downloader) backfillSortMetadata(ctx context.Context, source string) ([
 				if err == nil {
 					patch.SortMetadata.Version = dramaSortMetadataVersion(drama)
 					patch.SortMetadata.CoverChecked = dramaProvider(drama) == sourceHongguo
+					patch.SortMetadata.VIPChecked = dramaProvider(drama) == sourceHuangdou
 				}
 				results <- result{patch: patch, previous: drama, err: err}
 			}
@@ -184,7 +186,7 @@ func (d *Downloader) backfillSortMetadata(ctx context.Context, source string) ([
 				failures[provider] = fmt.Errorf("部分历史资料未补齐，可稍后重试: %w", result.err)
 			}
 		}
-		if patch.OnlineDate != "" && patch.OnlineDate != result.previous.OnlineDate || patch.Heat != "" && patch.Heat != result.previous.Heat || patch.Views != "" && patch.Views != result.previous.Views || bestDramaCover(patch) != "" && bestDramaCover(patch) != bestDramaCover(result.previous) || huangguoContentChanged(result.previous, mergeDramaMetadata(patch, result.previous)) {
+		if patch.VIP != nil && (result.previous.VIP == nil || *patch.VIP != *result.previous.VIP) || patch.OnlineDate != "" && patch.OnlineDate != result.previous.OnlineDate || patch.Heat != "" && patch.Heat != result.previous.Heat || patch.Views != "" && patch.Views != result.previous.Views || bestDramaCover(patch) != "" && bestDramaCover(patch) != bestDramaCover(result.previous) || huangguoContentChanged(result.previous, mergeDramaMetadata(patch, result.previous)) {
 			progress.Updated++
 		}
 		patches = append(patches, patch)

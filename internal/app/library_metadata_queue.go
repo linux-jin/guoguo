@@ -135,6 +135,7 @@ func (a *UIApp) runSortMetadataQueue(ctx context.Context, done chan struct{}) {
 		if err == nil {
 			patch.SortMetadata.Version = dramaSortMetadataVersion(previous)
 			patch.SortMetadata.CoverChecked = dramaProvider(previous) == sourceHongguo
+			patch.SortMetadata.VIPChecked = dramaProvider(previous) == sourceHuangdou
 		}
 		normalizeDramaCover(&patch)
 		a.mu.Lock()
@@ -153,7 +154,7 @@ func (a *UIApp) runSortMetadataQueue(ctx context.Context, done chan struct{}) {
 				patch.Title, patch.Name = drama.Title, drama.Name
 			}
 			updated := mergeDramaMetadata(patch, drama)
-			if patch.OnlineDate != "" && patch.OnlineDate != drama.OnlineDate || patch.Heat != "" && patch.Heat != drama.Heat || patch.Views != "" && patch.Views != drama.Views || bestDramaCover(patch) != "" && bestDramaCover(patch) != bestDramaCover(drama) || huangguoContentChanged(drama, updated) {
+			if patch.VIP != nil && (drama.VIP == nil || *patch.VIP != *drama.VIP) || patch.OnlineDate != "" && patch.OnlineDate != drama.OnlineDate || patch.Heat != "" && patch.Heat != drama.Heat || patch.Views != "" && patch.Views != drama.Views || bestDramaCover(patch) != "" && bestDramaCover(patch) != bestDramaCover(drama) || huangguoContentChanged(drama, updated) {
 				a.libraryMetadata.Updated++
 			}
 			a.dramas[index] = updated

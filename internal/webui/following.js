@@ -1,4 +1,5 @@
-import { $, element, button, icon, initial, withFocus, dramaTitle, sourceKey, sourceLabel, episodeCount, number, setMessage } from './ui-core.js';
+import { $, element, button, icon, initial, withFocus, dramaTitle, sourceKey, sourceLabel, episodeCount, coverURL, number, setMessage } from './ui-core.js';
+import { retryCoverURL } from './cover-retry.js';
 
 export function createFollowing(app) {
   const entries = new Map(), pending = new Set();
@@ -19,7 +20,7 @@ export function createFollowing(app) {
       const entry = get(id), watched = history.get(id), drama = app.library?.get(id);
       const total = number(drama && episodeCount(drama)) || entry?.totalEpisode || watched?.total || 0;
       const completed = Boolean(entry?.completed && !entry.newEpisodes || watched?.completed && watched.index >= Math.max(total, watched.total));
-      return {id, title: drama ? dramaTitle(drama) : entry?.title || watched?.title || '短剧', source: drama ? sourceKey(drama) : entry?.source || watched?.source, history: watched, entry, total, completed, watching: !completed && Boolean(watched || entry?.completed), saved: Boolean(entry?.saved), newEpisodes: entry?.newEpisodes || 0};
+      return {id, cover: drama ? coverURL(drama) : '', title: drama ? dramaTitle(drama) : entry?.title || watched?.title || '短剧', source: drama ? sourceKey(drama) : entry?.source || watched?.source, history: watched, entry, total, completed, watching: !completed && Boolean(watched || entry?.completed), saved: Boolean(entry?.saved), newEpisodes: entry?.newEpisodes || 0};
     }).sort((left, right) => new Date(right.history?.watchedAt || right.entry?.updatedAt || 0) - new Date(left.history?.watchedAt || left.entry?.updatedAt || 0));
   }
 
@@ -51,6 +52,43 @@ export function createFollowing(app) {
     });
   }
 
+  function renderCover(record) {
+    const poster = element('span', 'following-cover');
+    poster.coverAddress = record.cover;
+    poster.setAttribute('aria-hidden', 'true');
+    const fallback = element('span', '', initial(record.title));
+    if (record.cover) {
+      const image = element('img');
+      image.alt = '';
+      image.loading = 'lazy';
+      image.decoding = 'async';
+      image.addEventListener('error', () => {image.replaceWith(fallback); app.library?.coverFailed(record.id, record.cover);});
+      image.addEventListener('load', () => app.library?.coverLoaded(record.id, record.cover));
+      image.src = record.cover;
+      poster.retryCover = () => {if (fallback.isConnected) {image.src = retryCoverURL(record.cover); fallback.replaceWith(image);}};
+      poster.appendChild(image);
+    } else poster.appendChild(fallback);
+    return poster;
+  }
+
+  function refreshCover(id) {
+    const drama = app.library?.get(id);
+    if (!drama) return;
+    const cover = coverURL(drama);
+    for (const row of $('followingList').querySelectorAll('.following-row')) {
+      if (row.dataset.dramaId !== id) continue;
+      const poster = row.querySelector('.following-cover');
+      if (poster?.coverAddress === cover) poster.retryCover?.();
+      else poster?.replaceWith(renderCover({id, title: dramaTitle(drama), cover}));
+    }
+  }
+
+  function retryCovers(id) {
+    for (const row of $('followingList').querySelectorAll('.following-row')) {
+      if (!id || row.dataset.dramaId === id) row.querySelector('.following-cover')?.retryCover?.();
+    }
+  }
+
   function render() {
     const all = records();
     const lists = {watching: all.filter(entry => entry.watching), saved: all.filter(entry => entry.saved && !entry.watching && !entry.completed), completed: all.filter(entry => entry.completed)};
@@ -68,8 +106,7 @@ export function createFollowing(app) {
       for (const record of list.slice(0, visibleLimit)) {
         const row = element('article', 'following-row');
         row.dataset.dramaId = record.id;
-        const identity = element('span', 'continue-initial', initial(record.title));
-        identity.setAttribute('aria-hidden', 'true');
+        const identity = renderCover(record);
         const description = element('div', 'following-description');
         const name = button(record.title, () => app.details.open(record.id), false, 'following-title');
         name.dataset.focusKey = 'following-title-' + record.id;
@@ -190,5 +227,5 @@ export function createFollowing(app) {
     return refresh();
   }
 
-  return {init, render, refresh, get, toggleSaved, setCompleted, saveButton, showTab, busy: id => pending.has(id), acknowledge: id => {if (get(id)?.newEpisodes) change(id, {acknowledge: true});}};
+  return {init, render, refresh, refreshCover, retryCovers, get, toggleSaved, setCompleted, saveButton, showTab, busy: id => pending.has(id), acknowledge: id => {if (get(id)?.newEpisodes) change(id, {acknowledge: true});}};
 }

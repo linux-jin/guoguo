@@ -106,7 +106,7 @@ func TestPlaybackAndDownloadResumeInterruptedMedia(t *testing.T) {
 				}
 				mux := http.NewServeMux()
 				app.registerPlaybackRoutes(mux)
-				local := httptest.NewServer(mux)
+				local := httptest.NewServer(viewerFixtureHandler(app, mux))
 				t.Cleanup(local.Close)
 				input = local.URL + address
 			case "download", "failed download":
@@ -146,7 +146,7 @@ func TestPlaybackAndDownloadResumeInterruptedMedia(t *testing.T) {
 				}
 				writer := httptest.NewRecorder()
 				request := httptest.NewRequest(http.MethodGet, fmt.Sprintf("http://localhost/api/ui/playback/stream?session=fixture&episode=%d", episode), nil).WithContext(ctx)
-				app.handlePlaybackStream(writer, request)
+				app.handlePlaybackStream(writer, viewerFixtureRequest(app, request))
 				state, _ := app.playbackStatus("fixture", false)
 				if writer.Code != http.StatusOK || state.State != "ended" || state.Error != "" || state.Duration != 60 {
 					t.Fatalf("recovered playback failed: HTTP=%d state=%+v", writer.Code, state)

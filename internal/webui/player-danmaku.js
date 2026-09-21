@@ -175,7 +175,7 @@
     const timeout = setTimeout(() => requestController.abort(), 12000);
     try {
       const query = new URLSearchParams({session: currentSession, episode: String(currentEpisode), start: String(start), duration: String(duration)});
-      const response = await fetch('/api/ui/playback/danmaku?' + query, {signal: requestController.signal, headers: {'Accept': 'application/json'}});
+      const response = await fetch('/api/ui/playback/danmaku?' + query, {signal: requestController.signal, credentials: 'same-origin', headers: {'Accept': 'application/json', ...window.JukuViewer?.headers()}});
       if (!response.ok) throw new Error('弹幕暂不可用');
       const page = await response.json();
       if (token !== generation || controller !== requestController || requestController.signal.aborted) return;

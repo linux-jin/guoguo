@@ -62,6 +62,7 @@ type ffmpegInstaller struct {
 	client     *http.Client
 	pack       ffmpegPackage
 	state      ffmpegInstallState
+	record     func(diagnosticEvent)
 	done       chan struct{}
 	cancel     context.CancelFunc
 	lastError  error
@@ -72,11 +73,7 @@ func (downloader *Downloader) ffmpegInstallation() *ffmpegInstaller {
 	downloader.ffmpegMu.Lock()
 	defer downloader.ffmpegMu.Unlock()
 	if downloader.ffmpegInstaller == nil {
-		directory, _ := filepath.Abs(filepath.Join("bin", runtime.GOOS+"-"+runtime.GOARCH))
-		name := "ffmpeg"
-		if runtime.GOOS == "windows" {
-			name += ".exe"
-		}
+		directory, name := ffmpegManagedDirectory(), ffmpegExecutableName()
 		client := *downloader.client
 		client.Timeout = 0
 		client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
@@ -87,10 +84,7 @@ func (downloader *Downloader) ffmpegInstallation() *ffmpegInstaller {
 		}
 		installer := &ffmpegInstaller{
 			configured: downloader.cfg.FFmpeg, directory: directory, name: name, client: &client,
-			pack: ffmpegPackages[runtime.GOOS+"/"+runtime.GOARCH], state: ffmpegInstallState{Status: "idle"},
-		}
-		if path, err := exec.LookPath(portableFFmpeg(installer.configured)); err == nil {
-			installer.state = ffmpegInstallState{Status: "ready", Path: path, Detail: "FFmpeg 已就绪"}
+			pack: ffmpegPackages[runtime.GOOS+"/"+runtime.GOARCH], state: ffmpegInstallState{Status: "idle"}, record: downloader.recordDiagnostic,
 		}
 		downloader.ffmpegInstaller = installer
 	}
@@ -127,11 +121,6 @@ func (installer *ffmpegInstaller) ensure(ctx context.Context) (string, error) {
 		installer.state.Status = "idle"
 	}
 	if installer.done == nil {
-		if path, err := exec.LookPath(portableFFmpeg(installer.configured)); err == nil {
-			installer.state = ffmpegInstallState{Status: "ready", Path: path, Detail: "FFmpeg 已就绪"}
-			installer.mu.Unlock()
-			return path, nil
-		}
 		if installer.lastError != nil && time.Since(installer.lastTry) < 30*time.Second {
 			err := installer.lastError
 			installer.mu.Unlock()
@@ -139,7 +128,7 @@ func (installer *ffmpegInstaller) ensure(ctx context.Context) (string, error) {
 		}
 		installer.done = make(chan struct{})
 		installer.lastTry = time.Now()
-		installer.state = ffmpegInstallState{Status: "downloading", Detail: "未找到 FFmpeg，正在自动准备"}
+		installer.state = ffmpegInstallState{Status: "verifying", Detail: "正在检查 FFmpeg 的播放能力"}
 		installCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		installer.cancel = cancel
 		go installer.run(installCtx)
@@ -157,18 +146,26 @@ func (installer *ffmpegInstaller) ensure(ctx context.Context) (string, error) {
 }
 
 func (installer *ffmpegInstaller) run(ctx context.Context) {
-	path, err := installer.install(ctx)
+	path, err := installer.prepare(ctx)
+	err = publicError(err)
+	event := diagnosticEvent{Level: "info", Event: "ffmpeg.ready", Message: "FFmpeg 已就绪：" + path}
+	if err != nil {
+		event = diagnosticEvent{Event: "ffmpeg.failed", Message: err.Error()}
+	}
+	if installer.record != nil {
+		installer.record(event)
+	}
 	installer.mu.Lock()
 	defer installer.mu.Unlock()
 	installer.cancel()
 	installer.cancel = nil
-	installer.lastError = publicError(err)
+	installer.lastError = err
 	if err != nil {
 		installer.state.Status = "failed"
-		installer.state.Error = installer.lastError.Error()
-		installer.state.Detail = "FFmpeg 自动准备失败，可调整代理后重试"
+		installer.state.Error = err.Error()
+		installer.state.Detail = "FFmpeg 准备失败，请检查路径、完整版本或代理"
 	} else {
-		installer.state = ffmpegInstallState{Status: "ready", Path: path, Detail: "FFmpeg 已就绪"}
+		installer.state = ffmpegInstallState{Status: "ready", Path: path, Detail: event.Message}
 	}
 	close(installer.done)
 	installer.done = nil
@@ -178,6 +175,7 @@ func (installer *ffmpegInstaller) retry() {
 	installer.mu.Lock()
 	if installer.done == nil {
 		installer.lastError = nil
+		installer.state = ffmpegInstallState{Status: "idle"}
 	}
 	installer.mu.Unlock()
 }
@@ -276,14 +274,21 @@ func unpackFFmpeg(archive, output string, pack ffmpegPackage) error {
 	return os.Chmod(output, 0755)
 }
 
+var configureFFmpegProbeProcess = func(command *exec.Cmd) {}
+
 func validateFFmpeg(ctx context.Context, path string) error {
 	checkCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	command := exec.CommandContext(checkCtx, path, "-hide_banner", "-encoders")
 	output := &cappedStringWriter{limit: 256 * 1024}
 	command.Stdout, command.Stderr = output, output
+	command.WaitDelay = time.Second
+	configureFFmpegProbeProcess(command)
 	if err := command.Run(); err != nil {
-		return fmt.Errorf("下载的 FFmpeg 无法在本机启动：%w", err)
+		if checkCtx.Err() != nil {
+			return fmt.Errorf("FFmpeg 能力检查未完成：%w", checkCtx.Err())
+		}
+		return fmt.Errorf("FFmpeg 无法启动：%w", err)
 	}
 	var video, audio bool
 	for _, line := range strings.Split(output.String(), "\n") {
@@ -294,13 +299,62 @@ func validateFFmpeg(ctx context.Context, path string) error {
 		}
 	}
 	if !video || !audio {
-		return errors.New("下载的 FFmpeg 缺少 libx264 或 AAC 编码器，未安装")
+		return errors.New("FFmpeg 缺少 libx264 或 AAC 编码器，需要完整版本")
+	}
+	command = exec.CommandContext(checkCtx, path,
+		"-hide_banner", "-loglevel", "error", "-nostdin", "-filter_threads", "1", "-filter_complex_threads", "1",
+		"-f", "lavfi", "-i", "color=c=black:s=16x16:r=30:d=0.1",
+		"-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+		"-t", "0.1", "-map", "0:v:0", "-map", "1:a:0",
+		"-vf", "fps=30,scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1",
+		"-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-profile:v", "baseline",
+		"-pix_fmt", "yuv420p", "-crf", "23", "-threads", "1",
+		"-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
+		"-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1")
+	output = &cappedStringWriter{limit: 16 * 1024}
+	command.Stdout, command.Stderr = io.Discard, output
+	command.WaitDelay = time.Second
+	configureFFmpegProbeProcess(command)
+	if err := command.Run(); err != nil {
+		if checkCtx.Err() != nil {
+			return fmt.Errorf("FFmpeg 播放能力检查未完成：%w", checkCtx.Err())
+		}
+		return fmt.Errorf("FFmpeg 无法完成 H.264/AAC 播放转码（需要 preset 等编码选项）：%w %s", err, truncate(strings.TrimSpace(output.String()), 1500))
 	}
 	return nil
 }
 
+func (installer *ffmpegInstaller) prepare(ctx context.Context) (string, error) {
+	candidates := ffmpegCandidates(installer.configured, installer.directory)
+	for _, path := range candidates {
+		installer.update("verifying", "正在检查 FFmpeg："+path, 0, 0)
+		err := validateFFmpeg(ctx, path)
+		if err == nil {
+			return path, nil
+		}
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if !automaticFFmpeg(installer.configured) {
+			return "", fmt.Errorf("指定的 FFmpeg 不可用（%s）：%w；请更正 download.ffmpeg / -ffmpeg，或设为 ffmpeg 使用自动查找", path, err)
+		}
+		if installer.record != nil {
+			installer.record(diagnosticEvent{Level: "warn", Event: "ffmpeg.rejected", Message: "跳过不可用 FFmpeg：" + path + "：" + err.Error()})
+		}
+	}
+	if !automaticFFmpeg(installer.configured) {
+		return "", fmt.Errorf("找不到指定的 FFmpeg（%s）；请更正 download.ffmpeg / -ffmpeg，或设为 ffmpeg 使用自动查找", normalizedFFmpegSetting(installer.configured))
+	}
+	detail := "未找到可用 FFmpeg，正在自动准备"
+	if len(candidates) > 0 {
+		detail = "现有 FFmpeg 未通过播放检查，正在自动准备兼容版本"
+	}
+	installer.update("downloading", detail, 0, installer.pack.archiveSize)
+	return installer.install(ctx)
+}
+
 func (installer *ffmpegInstaller) install(ctx context.Context) (string, error) {
-	if installer.configured != "" && installer.configured != "ffmpeg" && installer.configured != "ffmpeg.exe" {
+	if !automaticFFmpeg(installer.configured) {
 		return "", errors.New("指定的 FFmpeg 不可用，请更正 -ffmpeg 路径，或恢复默认 ffmpeg 以启用自动下载")
 	}
 	if installer.pack.platform == "" {
@@ -343,7 +397,7 @@ func (installer *ffmpegInstaller) install(ctx context.Context) (string, error) {
 	}
 	if err := os.Rename(work, installer.directory); err != nil {
 		installed := filepath.Join(installer.directory, installer.name)
-		if _, lookupErr := exec.LookPath(installed); lookupErr == nil {
+		if validationErr := validateFFmpeg(ctx, installed); validationErr == nil {
 			return installed, nil
 		}
 		return "", fmt.Errorf("保存 FFmpeg 失败，请检查 bin 目录权限或已有文件：%w", err)

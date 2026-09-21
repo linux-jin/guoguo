@@ -27,7 +27,7 @@ func followingFixture(t *testing.T) *UIApp {
 func followingListForTest(t *testing.T, app *UIApp) []followingView {
 	t.Helper()
 	writer := httptest.NewRecorder()
-	app.handleFollowing(writer, httptest.NewRequest(http.MethodGet, "http://localhost/api/ui/following", nil))
+	app.handleFollowing(writer, viewerFixtureRequest(app, httptest.NewRequest(http.MethodGet, "http://localhost/api/ui/following", nil)))
 	if writer.Code != http.StatusOK {
 		t.Fatal(writer.Code, writer.Body.String())
 	}
@@ -42,7 +42,7 @@ func followingListForTest(t *testing.T, app *UIApp) []followingView {
 
 func followingChangeForTest(t *testing.T, app *UIApp, input map[string]any) {
 	t.Helper()
-	writer := historyJSONRequest(t, app.handleFollowing, "/api/ui/following", input)
+	writer := historyJSONRequest(t, app, app.handleFollowing, "/api/ui/following", input)
 	if writer.Code != http.StatusOK {
 		t.Fatal(writer.Code, writer.Body.String())
 	}
@@ -51,10 +51,10 @@ func followingChangeForTest(t *testing.T, app *UIApp, input map[string]any) {
 func TestFollowingPersistsSeparatelyFromPlaybackAndSameNames(t *testing.T) {
 	app, session := historyFixtureApp(t)
 	app.dramas = followingFixture(t).dramas
-	if _, saved, err := app.recordPlaybackProgress(session.id, historyProgress(1, 24)); err != nil || !saved {
+	if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, historyProgress(1, 24)); err != nil || !saved {
 		t.Fatal(saved, err)
 	}
-	before, err := os.ReadFile(app.playbackHistory().path)
+	before, err := os.ReadFile(fixtureViewer(app).playbackHistory().path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestFollowingPersistsSeparatelyFromPlaybackAndSameNames(t *testing.T) {
 	if entries := followingListForTest(t, restarted); len(entries) != 1 || entries[0].DramaID != app.dramas[1].ID {
 		t.Fatal("removing manual completion did not clean the entry", entries)
 	}
-	after, _ := os.ReadFile(app.playbackHistory().path)
+	after, _ := os.ReadFile(fixtureViewer(app).playbackHistory().path)
 	if !bytes.Equal(before, after) {
 		t.Fatal("following or manual completion modified genuine playback history")
 	}
@@ -90,12 +90,12 @@ func TestFollowingNewEpisodesRequireKnownCountAndExplicitAcknowledgement(t *test
 	app := followingFixture(t)
 	followingChangeForTest(t, app, map[string]any{"dramaId": historyFixtureDramaID, "saved": true})
 	app.dramas[0].TotalEpisode = "6"
-	before, _ := os.ReadFile(app.followingStore().path)
+	before, _ := os.ReadFile(fixtureViewer(app).followingStore().path)
 	entry := followingListForTest(t, app)[0]
 	if entry.NewEpisodes != 3 || entry.TotalEpisode != 6 || entry.KnownEpisodes != 3 {
 		t.Fatal("catalog update was not reported", entry)
 	}
-	after, _ := os.ReadFile(app.followingStore().path)
+	after, _ := os.ReadFile(fixtureViewer(app).followingStore().path)
 	if !bytes.Equal(before, after) {
 		t.Fatal("reading following silently acknowledged updates")
 	}
@@ -120,7 +120,7 @@ func TestFollowingNewEpisodesRequireKnownCountAndExplicitAcknowledgement(t *test
 
 func TestFollowingAcceptsHistoryOnlyMetadataAndBoundsStoredText(t *testing.T) {
 	app, session := historyFixtureApp(t)
-	if _, saved, err := app.recordPlaybackProgress(session.id, historyProgress(1, 15)); err != nil || !saved {
+	if _, saved, err := app.recordPlaybackProgress(fixtureViewer(app), session.id, historyProgress(1, 15)); err != nil || !saved {
 		t.Fatal(saved, err)
 	}
 	followingChangeForTest(t, app, map[string]any{"dramaId": historyFixtureDramaID, "saved": true})
@@ -129,7 +129,7 @@ func TestFollowingAcceptsHistoryOnlyMetadataAndBoundsStoredText(t *testing.T) {
 	}
 	app.dramas = []Drama{{ID: historyFixtureDramaID, Title: strings.Repeat("剧", 2000), CategoryName: strings.Repeat("分类", 1000)}}
 	followingChangeForTest(t, app, map[string]any{"dramaId": historyFixtureDramaID, "completed": true})
-	entries, err := newFollowingStore(app.cfg.dataDirectory()).list()
+	entries, err := newFollowingStore(fixtureViewer(app).directory).list()
 	if err != nil || len(entries) != 1 || len(entries[0].Title) > 4096 || len(entries[0].Category) > 512 || !utf8.ValidString(entries[0].Title) || !utf8.ValidString(entries[0].Category) {
 		t.Fatal("long cached metadata could not survive restart", entries, err)
 	}
@@ -156,7 +156,7 @@ func TestFollowingRejectsCrossSiteUnknownAndMalformedRequests(t *testing.T) {
 			request.Header.Set("Content-Type", test.contentType)
 			request.Header.Set("Origin", test.origin)
 			writer := httptest.NewRecorder()
-			app.handleFollowing(writer, request)
+			app.handleFollowing(writer, viewerFixtureRequest(app, request))
 			if writer.Code != test.status {
 				t.Fatal(writer.Code, writer.Body.String())
 			}
@@ -183,7 +183,7 @@ func TestFollowingConcurrentUpdatesSurviveRestart(t *testing.T) {
 				request := httptest.NewRequest("POST", "http://localhost/api/ui/following", bytes.NewReader(body))
 				request.Header.Set("Content-Type", "application/json")
 				writer := httptest.NewRecorder()
-				app.handleFollowing(writer, request)
+				app.handleFollowing(writer, viewerFixtureRequest(app, request))
 				if writer.Code != http.StatusOK {
 					t.Error(writer.Code, writer.Body.String())
 				}
@@ -191,7 +191,7 @@ func TestFollowingConcurrentUpdatesSurviveRestart(t *testing.T) {
 		}
 	}
 	wait.Wait()
-	entries, err := newFollowingStore(app.cfg.dataDirectory()).list()
+	entries, err := newFollowingStore(fixtureViewer(app).directory).list()
 	if err != nil || len(entries) != len(app.dramas) {
 		t.Fatal("concurrent entries were lost", len(entries), err)
 	}
@@ -205,11 +205,11 @@ func TestFollowingConcurrentUpdatesSurviveRestart(t *testing.T) {
 func TestFollowingWriteFailureRollsBackAndCorruptFilesArePreserved(t *testing.T) {
 	app := followingFixture(t)
 	followingChangeForTest(t, app, map[string]any{"dramaId": historyFixtureDramaID, "saved": true})
-	store := app.followingStore()
+	store := fixtureViewer(app).followingStore()
 	path := store.path
 	before, _ := os.ReadFile(path)
 	store.path = app.cfg.dataDirectory()
-	writer := historyJSONRequest(t, app.handleFollowing, "/api/ui/following", map[string]any{"dramaId": historyFixtureDramaID, "saved": false})
+	writer := historyJSONRequest(t, app, app.handleFollowing, "/api/ui/following", map[string]any{"dramaId": historyFixtureDramaID, "saved": false})
 	if writer.Code != http.StatusInternalServerError || !followingListForTest(t, app)[0].Saved {
 		t.Fatal("failed write was reported as a successful mutation", writer.Code, writer.Body.String())
 	}
@@ -224,7 +224,7 @@ func TestFollowingWriteFailureRollsBackAndCorruptFilesArePreserved(t *testing.T)
 			t.Fatal(err)
 		}
 		restarted := &UIApp{cfg: app.cfg, dramas: app.dramas}
-		writer := historyJSONRequest(t, restarted.handleFollowing, "/api/ui/following", map[string]any{"dramaId": historyFixtureDramaID, "saved": true})
+		writer := historyJSONRequest(t, restarted, restarted.handleFollowing, "/api/ui/following", map[string]any{"dramaId": historyFixtureDramaID, "saved": true})
 		if writer.Code != http.StatusInternalServerError {
 			t.Fatal("invalid storage was silently replaced", writer.Code)
 		}
@@ -239,19 +239,22 @@ func TestFollowingLoadRejectsSourceMismatchAndLimitPreservesExistingEntries(t *t
 	app := followingFixture(t)
 	entry := followingEntry{DramaID: historyFixtureDramaID, Source: "huangdou", Title: "无图测试", Saved: true, AddedAt: time.Now(), UpdatedAt: time.Now()}
 	body, _ := json.Marshal(followingFile{Version: 1, Entries: []followingEntry{entry}})
-	if err := os.WriteFile(filepath.Join(app.cfg.dataDirectory(), "following.json"), body, 0o600); err != nil {
+	if err := os.MkdirAll(fixtureViewer(app).directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixtureViewer(app).directory, "following.json"), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if entries := followingListForTest(t, app); len(entries) != 0 {
 		t.Fatal("mismatched source identity was restored", entries)
 	}
-	store := app.followingStore()
+	store := fixtureViewer(app).followingStore()
 	for index := 0; index < followingLimit; index++ {
 		entry.DramaID = fmt.Sprintf("hongguo:%d", int64(7000000000000100000)+int64(index))
 		entry.Source = "hongguo"
 		store.entries[entry.DramaID] = entry
 	}
-	writer := historyJSONRequest(t, app.handleFollowing, "/api/ui/following", map[string]any{"dramaId": historyFixtureDramaID, "saved": true})
+	writer := historyJSONRequest(t, app, app.handleFollowing, "/api/ui/following", map[string]any{"dramaId": historyFixtureDramaID, "saved": true})
 	if writer.Code != http.StatusConflict || len(store.entries) != followingLimit {
 		t.Fatal("full following store silently evicted entries", writer.Code, len(store.entries))
 	}

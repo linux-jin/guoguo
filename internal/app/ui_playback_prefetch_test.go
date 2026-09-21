@@ -21,6 +21,9 @@ func prefetchFixtureApp(t *testing.T) (*UIApp, *playbackSession) {
 		t.Error("cache hit unexpectedly requested an upstream resource")
 		return nil, errors.New("unexpected network request")
 	})}
+	app.cfg = app.downloader.cfg
+	session.viewer = fixtureViewer(app)
+	session.viewer.retain()
 	t.Cleanup(app.closePlaybacks)
 	return app, session
 }
@@ -29,7 +32,7 @@ func prefetchRequest(app *UIApp, body string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodPost, "http://localhost/api/ui/playback/prefetch", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	writer := httptest.NewRecorder()
-	app.handlePlaybackPrefetch(writer, request)
+	app.handlePlaybackPrefetch(writer, viewerFixtureRequest(app, request))
 	return writer
 }
 
@@ -46,7 +49,7 @@ func TestPlaybackPrefetchReusesEncodedBytesAndRun(t *testing.T) {
 	}
 	cache.finish(nil)
 	writer := httptest.NewRecorder()
-	app.handlePlaybackStream(writer, httptest.NewRequest(http.MethodGet, "http://localhost/api/ui/playback/stream?session=fixture&episode=2", nil))
+	app.handlePlaybackStream(writer, viewerFixtureRequest(app, httptest.NewRequest(http.MethodGet, "http://localhost/api/ui/playback/stream?session=fixture&episode=2", nil)))
 	if writer.Code != 200 || !bytes.Equal(writer.Body.Bytes(), fixture) || writer.Header().Get("X-Playback-Prefetched") != "1" || writer.Header().Get("X-Playback-Run") != "5" {
 		t.Fatal("cached episode was restarted or corrupted")
 	}

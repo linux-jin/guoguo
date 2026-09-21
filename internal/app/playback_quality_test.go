@@ -61,10 +61,10 @@ func TestPlaybackRunRejectsStaleRequestsAndDifferentQualityPrefetch(t *testing.T
 	old := newPlaybackPrefetch(2, session.run)
 	old.quality = 720
 	session.prefetch = old
-	if _, status, err := app.beginPlayback(context.Background(), "fixture", 2, 0, 720, 4, false); err == nil || status != http.StatusConflict || session.prefetch != old {
+	if _, status, err := app.beginPlayback(viewerFixtureContext(app, context.Background()), "fixture", 2, 0, 720, 4, false); err == nil || status != http.StatusConflict || session.prefetch != old {
 		t.Fatal("stale request replaced the current playback")
 	}
-	run, _, err := app.beginPlayback(context.Background(), "fixture", 2, 0, 1080, 6, false)
+	run, _, err := app.beginPlayback(viewerFixtureContext(app, context.Background()), "fixture", 2, 0, 1080, 6, false)
 	if err != nil {
 		t.Fatal(err)
 	}
