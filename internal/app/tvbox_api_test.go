@@ -213,3 +213,33 @@ func TestTVBoxPlayCanForceProxyAndRejectTampering(t *testing.T) {
 		t.Fatalf("tampered signed episode accepted: %d", forged.Code)
 	}
 }
+
+func TestTVBoxListTypeAliasFiltersCategory(t *testing.T) {
+	t.Setenv("JUKU_TVBOX_ENABLED", "1")
+	t.Setenv("JUKU_TVBOX_TOKEN", "secret-token")
+	app := tvboxFixtureApp(t)
+	for _, raw := range []string{
+		"/api.php/provide/vod/?token=secret-token&type=3",
+		"/api.php/provide/vod/?ac=list&t=3&token=secret-token",
+		"/api.php/provide/vod/?token=secret-token&type_id=3",
+	} {
+		writer := httptest.NewRecorder()
+		app.routes().ServeHTTP(writer, httptest.NewRequest(http.MethodGet, raw, nil))
+		if writer.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", raw, writer.Code, writer.Body.String())
+		}
+		var response tvboxResponse
+		if err := json.Unmarshal(writer.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Code != 1 || response.Total != 1 || len(response.List) != 1 || response.List[0].VodID != "hongguo:100" {
+			t.Fatalf("%s unexpected response: %+v", raw, response)
+		}
+	}
+	writer := httptest.NewRecorder()
+	app.routes().ServeHTTP(writer, httptest.NewRequest(http.MethodGet, "/api.php/provide/vod/?token=secret-token&type=2", nil))
+	var response tvboxResponse
+	if err := json.Unmarshal(writer.Body.Bytes(), &response); err != nil || response.Total != 1 || response.List[0].VodID != "huangdou:200" {
+		t.Fatalf("type=2 unexpected: err=%v %+v", err, response)
+	}
+}

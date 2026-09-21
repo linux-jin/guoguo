@@ -171,7 +171,7 @@ func (app *UIApp) handleTVBoxAPI(writer http.ResponseWriter, request *http.Reque
 	ctx, cancel := context.WithTimeout(request.Context(), 90*time.Second)
 	defer cancel()
 	dramas := app.tvboxDramas(ctx)
-	filtered := tvboxFilterDramas(dramas, firstNonEmpty(query.Get("wd"), query.Get("q"), query.Get("keyword")), query.Get("t"))
+	filtered := tvboxFilterDramas(dramas, firstNonEmpty(query.Get("wd"), query.Get("q"), query.Get("keyword")), tvboxTypeQuery(query))
 	if ids := strings.TrimSpace(query.Get("ids")); ids != "" {
 		filtered = tvboxFilterIDs(filtered, ids)
 	}
@@ -233,6 +233,10 @@ func (app *UIApp) tvboxDramas(ctx context.Context) []Drama {
 		app.mu.Unlock()
 	}
 	return dramas
+}
+
+func tvboxTypeQuery(query url.Values) string {
+	return firstNonEmpty(query.Get("t"), query.Get("type"), query.Get("typeid"), query.Get("type_id"))
 }
 
 func tvboxFilterDramas(dramas []Drama, keyword, typeID string) []Drama {

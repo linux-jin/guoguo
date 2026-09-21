@@ -92,7 +92,7 @@
         <section class="admin-card" aria-labelledby="adminCreateTitle"><h2 id="adminCreateTitle">创建用户</h2>
           <form id="adminCreateUserForm" class="account-form">
             <label>用户名<input id="adminNewUsername" type="text" minlength="2" maxlength="32" autocomplete="off" autocapitalize="none" required></label>
-            <label>初始密码<input id="adminNewUserPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" required placeholder="10–128 个字符"></label>
+            <label>初始密码<input id="adminNewUserPassword" type="password" minlength="1" maxlength="128" autocomplete="new-password" required placeholder="1–128 个字符，可自行设置"></label>
             <fieldset class="account-source-fieldset"><legend>可用站源</legend><div id="adminNewUserSources" class="account-source-choices"></div></fieldset>
             <label class="account-check"><input id="adminNewOnlineOnly" type="checkbox"><span>仅在线观看<small>隐藏下载入口，禁止下载、任务管理和 Emby 导出。</small></span></label>
             <button id="adminCreateUserBtn" class="secondary" type="submit">创建用户</button>
@@ -213,8 +213,8 @@
       <p id="accountRegistrationDisabled" class="small" hidden>注册已关闭，请联系管理员创建账号。</p>
       <form id="accountForm" class="account-form">
         <label>用户名<input id="accountUsername" name="username" type="text" minlength="2" maxlength="32" autocomplete="username" autocapitalize="none" spellcheck="false" required placeholder="中文、字母、数字均可"></label>
-        <label>密码<input id="accountPassword" name="password" type="password" minlength="10" maxlength="128" autocomplete="current-password" required placeholder="10–128 个字符"></label>
-        <label id="accountConfirmRow" hidden>确认密码<input id="accountPasswordConfirm" type="password" minlength="10" maxlength="128" autocomplete="new-password"></label>
+        <label>密码<input id="accountPassword" name="password" type="password" minlength="1" maxlength="128" autocomplete="current-password" required placeholder="1–128 个字符，可自行设置"></label>
+        <label id="accountConfirmRow" hidden>确认密码<input id="accountPasswordConfirm" type="password" minlength="1" maxlength="128" autocomplete="new-password"></label>
         <label id="accountImportOnRegisterRow" class="account-check" hidden><input id="accountImportOnRegister" type="checkbox" checked><span>把此浏览器原有记录接入新账号</span></label>
         <button id="accountSubmitBtn" type="submit">登录</button>
       </form>
@@ -226,9 +226,9 @@
       <div id="accountGuestImportSection" class="account-import" hidden><p class="small">此浏览器还有未接入账号的旧记录。接回时保留账号已有记录。</p><button id="accountImportGuestBtn" class="secondary">接回此浏览器原有记录</button></div>
       <p id="accountForcedPasswordHint" class="account-initial-note" hidden>请先修改服务启动时生成的随机初始密码，再使用剧库。</p>
       <details id="accountPasswordDetails" class="account-password"><summary>修改密码</summary><form id="accountPasswordForm" class="account-form">
-        <label>当前密码<input id="accountCurrentPassword" type="password" minlength="10" maxlength="128" autocomplete="current-password" required></label>
-        <label>新密码<input id="accountNewPassword" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></label>
-        <label>确认新密码<input id="accountNewPasswordConfirm" type="password" minlength="10" maxlength="128" autocomplete="new-password" required></label>
+        <label>当前密码<input id="accountCurrentPassword" type="password" minlength="1" maxlength="128" autocomplete="current-password" required></label>
+        <label>新密码<input id="accountNewPassword" type="password" minlength="1" maxlength="128" autocomplete="new-password" required></label>
+        <label>确认新密码<input id="accountNewPasswordConfirm" type="password" minlength="1" maxlength="128" autocomplete="new-password" required></label>
         <button type="submit">保存新密码</button><p class="small">修改后，其他设备需重新登录。</p>
       </form></details>
       <button id="accountManageUsersBtn" class="secondary account-manage-users button-content" data-go="users" data-admin-only hidden><span data-icon="user"></span>用户管理</button>

@@ -43,7 +43,7 @@ go run .
 go run . -admin-user owner -admin-password 'replace-with-your-own-password'
 ```
 
-只有自行指定了密码才免除首次强制改密；仅修改管理员名称仍会生成随机密码。用户名为 2–32 个中文、字母、数字、下划线或短横线，大小写不敏感；密码为 10–128 个字符。环境变量 `JUKU_ADMIN_USER`、`JUKU_ADMIN_PASSWORD` 也可设置，显式启动参数优先。
+只有自行指定了密码才免除首次强制改密；仅修改管理员名称仍会生成随机密码。用户名为 2–32 个中文、字母、数字、下划线或短横线，大小写不敏感；密码为 1–128 个字符，可自行设置便于记忆的口令。环境变量 `JUKU_ADMIN_USER`、`JUKU_ADMIN_PASSWORD` 也可设置，显式启动参数优先。
 
 登录管理员后，从顶部“更多 → 用户管理”打开独立管理页面，也可从账号弹窗进入。用户管理集中设置访问策略、创建用户、搜索用户和保存权限；账号弹窗保留登录、退出和个人改密。
 
@@ -369,10 +369,11 @@ GET /api/tvbox/config?token=你的令牌
 GET /api.php/provide/vod/?ac=list&token=你的令牌
 GET /api.php/provide/vod/?ac=list&wd=关键词&token=你的令牌
 GET /api.php/provide/vod/?ac=list&t=3&pg=1&token=你的令牌
+GET /api.php/provide/vod/?token=你的令牌&type=1
 GET /api.php/provide/vod/?ac=detail&ids=完整剧集ID&token=你的令牌
 ```
 
-把 `/api/tvbox/config?token=...` 交给支持远程配置的 TVBox，或手动添加 `/api.php/provide/vod/` 作为 JSON 站源。分类编号为：`1` 黄果、`2` 黄豆、`3` 红果、`4` 黄果 AI、`5` 黄果视频。`vod_id` 使用带站源前缀的完整剧集 ID，不要删掉 `hongguo:`、`huangdou:` 等前缀。
+把 `/api/tvbox/config?token=...` 交给支持远程配置的 TVBox，或手动添加 `/api.php/provide/vod/` 作为 JSON 站源。分类可用 MacCMS 标准参数 `t`，也可用 `type` / `typeid` / `type_id`：`1` 黄果、`2` 黄豆、`3` 红果、`4` 黄果 AI、`5` 黄果视频。例如 `.../vod/?token=令牌&type=1` 只取黄果，`type=3` 只取红果；不带分类参数则返回全部站源。`vod_id` 使用带站源前缀的完整剧集 ID，不要删掉 `hongguo:`、`huangdou:` 等前缀。
 
 TVBox 接口必须同时设置独立令牌，不读取网页浏览器 Cookie，也不自动继承网页账号的匿名观看记录；它适合自用客户端。令牌会出现在 TVBox 配置 URL 和封面 URL 中，请不要把配置链接公开分享。每集播放链接使用独立 HMAC 签名，不包含目录令牌。`JUKU_TVBOX_DIRECT` 默认开启：响应头 `X-Juku-TVBox-Delivery: direct` 表示已跳到源站，`proxy` 表示回退本服务。直连成功后视频正文不经过本服务；解析请求仍会经过本服务。要整体撤销已生成的播放链接，可备份后删除 `data/emby-key` 并重启，再重新加载 TVBox 详情。
 自动直连的安全条件比较保守：不携带或转发网页登录 Cookie、Authorization、Referer；拒绝服务端 AES/HLS/CENC 密钥、本地文件、多码率主清单、不可验证的 URL、HTTPS 降级跳转及不支持 Range 的 MP4。探测不通过不会报错，而是透明回退 Render/VPS 中转。因此黄果部分公开 MP4/HLS 有机会省掉服务器视频流量，红果通常仍走服务器解密或封装。源站策略和临时 URL 会变化，同一剧不同集也可能得到不同结果。

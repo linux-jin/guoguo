@@ -26,9 +26,12 @@ func normalizeAccountUsername(name string) (string, string, error) {
 }
 
 func validateAccountPassword(password string) error {
+	if !utf8.ValidString(password) {
+		return errors.New("密码不是有效文本")
+	}
 	count := utf8.RuneCountInString(password)
-	if !utf8.ValidString(password) || count < 10 || count > 128 {
-		return errors.New("密码需为 10–128 个字符，可使用长短语")
+	if count < 1 || count > 128 {
+		return errors.New("密码需为 1–128 个字符")
 	}
 	return nil
 }
